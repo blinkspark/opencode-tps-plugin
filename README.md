@@ -72,7 +72,7 @@ npm login --registry=https://registry.npmjs.org/
 npm publish        # publishConfig 已指定官方源与 public
 ```
 
-`prepublishOnly` 会先执行构建和类型检查。
+`prepublishOnly` 会先执行构建和类型检查。完整的发布流程、2FA 处理、验证与常见错误见 [docs/PUBLISH.md](docs/PUBLISH.md)。
 
 ## 结构
 
