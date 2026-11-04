@@ -1,3 +1,5 @@
+<img src="https://raw.githubusercontent.com/blinkspark/opencode-tps-plugin/main/assets/icon.svg" width="88" height="88" alt="TPS meter icon" align="right" />
+
 # @blinkspark/opencode-tps-plugin
 
 在 OpenCode Desktop 的**会话标题栏**显示 tokens per second。
