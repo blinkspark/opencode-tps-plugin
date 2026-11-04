@@ -1,4 +1,4 @@
-.tps-badge {
+.opencode-tps-badge {
   margin-left: 6px;
   color: inherit;
   font-size: 11px;
@@ -9,6 +9,6 @@
   opacity: 0.5;
 }
 
-.tps-badge[data-live="true"] {
+.opencode-tps-badge[data-live="true"] {
   opacity: 0.85;
 }

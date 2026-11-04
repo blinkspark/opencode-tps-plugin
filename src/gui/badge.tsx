@@ -18,6 +18,8 @@ type Sample = {
   chars: number
 }
 
+type DeltaKind = "text" | "reasoning" | "tool"
+
 const WINDOW_MS = 2_000
 const MIN_SPAN_MS = 350
 const TICK_MS = 200
@@ -50,19 +52,31 @@ export function TpsBadge(props: TpsBadgeProps) {
   // languages differ a lot, so an adaptive ratio beats a fixed one.
   let ratio = DEFAULT_CHARS_PER_TOKEN
   let startedAt = 0
+  let firstDeltaAt = 0
+  let lastDeltaAt = 0
+  let sawReasoningDelta = false
   let stepChars = 0
   let samples: Sample[] = []
 
   const reset = () => {
     startedAt = 0
+    firstDeltaAt = 0
+    lastDeltaAt = 0
+    sawReasoningDelta = false
     stepChars = 0
     samples = []
   }
 
-  const push = (sessionID: string, delta: string, at: number) => {
+  const push = (sessionID: string, delta: string, at: number, kind: DeltaKind) => {
     if (sessionID !== props.session.id || delta.length === 0) return
+    if (kind === "reasoning") {
+      if (!props.countReasoning) return
+      sawReasoningDelta = true
+    }
 
     const time = at > 0 ? at : Date.now()
+    if (firstDeltaAt === 0) firstDeltaAt = time
+    lastDeltaAt = time
     stepChars += delta.length
     samples.push({ at: time, chars: delta.length })
 
@@ -76,6 +90,9 @@ export function TpsBadge(props: TpsBadgeProps) {
     if (sessionID !== props.session.id) return
 
     startedAt = started > 0 ? started : Date.now()
+    firstDeltaAt = 0
+    lastDeltaAt = 0
+    sawReasoningDelta = false
     stepChars = 0
     samples = []
     setRunning(true)
@@ -90,11 +107,19 @@ export function TpsBadge(props: TpsBadgeProps) {
     const valid = startedAt > 0 && startedAt <= end
 
     if (produced > 0 && valid) {
-      const ms = Math.max(1, end - startedAt)
-      const tps = produced / (ms / 1_000)
-      setLast({ tps, tokens: produced, ms })
+      // Reasoning tokens can be hidden: the provider reports them but streams no
+      // reasoning deltas. Then the visible deltas start late, so measuring from the
+      // first delta would inflate the rate. Fall back to the request start instead.
+      const hiddenReasoning = props.countReasoning && tokens.reasoning > 0 && !sawReasoningDelta
+      const observed = firstDeltaAt > 0 && lastDeltaAt >= firstDeltaAt
 
-      if (stepChars >= 32) {
+      const from = observed && !hiddenReasoning ? Math.max(startedAt, firstDeltaAt) : startedAt
+      const to = observed ? Math.max(from, lastDeltaAt) : end
+      const ms = Math.max(1, to - from)
+
+      setLast({ tps: produced / (ms / 1_000), tokens: produced, ms })
+
+      if (stepChars >= 32 && !hiddenReasoning) {
         const sample = clamp(stepChars / produced, RATIO_MIN, RATIO_MAX)
         ratio = ratio * 0.5 + sample * 0.5
       }
@@ -118,13 +143,13 @@ export function TpsBadge(props: TpsBadgeProps) {
           begin(event.data.sessionID, event.data.started)
         }),
         data.on("session.text.delta", (event) => {
-          push(event.data.sessionID, event.data.delta, event.created)
+          push(event.data.sessionID, event.data.delta, event.created, "text")
         }),
         data.on("session.reasoning.delta", (event) => {
-          push(event.data.sessionID, event.data.delta, event.created)
+          push(event.data.sessionID, event.data.delta, event.created, "reasoning")
         }),
         data.on("session.tool.input.delta", (event) => {
-          push(event.data.sessionID, event.data.delta, event.created)
+          push(event.data.sessionID, event.data.delta, event.created, "tool")
         }),
         data.on("session.step.ended", (event) => {
           finish(event.data.sessionID, event.data.tokens, event.created)
@@ -200,7 +225,11 @@ export function TpsBadge(props: TpsBadgeProps) {
   return (
     <Show when={view()}>
       {(value) => (
-        <span class="tps-badge" data-live={value().live ? "true" : "false"} title={value().title}>
+        <span
+          class="opencode-tps-badge"
+          data-live={value().live ? "true" : "false"}
+          title={value().title}
+        >
           {value().label}
           {props.compact ? " t/s" : " tok/s"}
         </span>

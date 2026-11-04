@@ -1,9 +1,25 @@
 {
-  "name": "opencode-tps-plugin",
+  "name": "@blinkspark/opencode-tps-plugin",
   "version": "0.1.0",
-  "private": true,
-  "type": "module",
   "description": "Shows tokens per second in the OpenCode Desktop session header.",
+  "type": "module",
+  "license": "MIT",
+  "author": "BlinkSpark",
+  "homepage": "https://github.com/blinkspark/opencode-tps-plugin#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blinkspark/opencode-tps-plugin.git"
+  },
+  "bugs": {
+    "url": "https://github.com/blinkspark/opencode-tps-plugin/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "tps",
+    "tokens",
+    "desktop"
+  ],
   "exports": {
     ".": "./src/index.ts",
     "./gui-experimental": "./dist/gui-experimental.cjs"
@@ -12,10 +28,15 @@
     "src",
     "dist"
   ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
   "scripts": {
     "build": "vite build",
     "watch": "vite build --watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm run typecheck"
   },
   "dependencies": {
     "@opencode/plugin": "2.2.5"

@@ -1,6 +1,6 @@
 import { Plugin } from "@opencode/plugin"
 
 export default Plugin.define({
-  id: "tps",
+  id: "blinkspark-tps-meter",
   setup() {},
 })
