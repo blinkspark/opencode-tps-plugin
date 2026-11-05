@@ -2,12 +2,16 @@
 
 # @blinkspark/opencode-tps-plugin
 
-在 OpenCode Desktop 的**会话标题栏**显示 tokens per second。
+在 OpenCode Desktop 的**会话标题栏**显示实时 / 上一轮 tokens per second、首 token 延迟和缓存命中率。
 
-- 生成中：`~41 tok/s`，按最近 2 秒的流式增量估算；字符/ token 比例会从上一个完成的 step 自适应学习（中英文、代码混排都能跟得上）。
-- 每步结束：改用服务端上报的真实 token 数计算该步生成速度，排除首 token 等待时间，并**一直保留**到下一次生成，颜色变淡。
-- 悬停：显示该步的 token 数与生成耗时（`1234 tok · 27.3s`）。
-- 标题栏空间不足时自动切换紧凑格式（`41 t/s`）。
+- 生成中：`~41 tok/s · 38 avg · TTFT 0.9s · cache 87%`
+  - `~41 tok/s`：按最近 2 秒的流式增量估算；字符/token 比例会从上一个完成的 step 自适应学习（中英文、代码混排都能跟得上）。
+  - `38 avg`：上一个 step 的平均速度，用服务端真实 token 数计算，排除首 token 等待。
+  - `TTFT 0.9s`：首 token 延迟。等待首 token 时显示实时累加（`TTFT 1.2s…`）。
+  - `cache 87%`：当前会话累计的输入缓存命中率。
+- 每步结束：实时值消失，平均值更新为该步结果，并**一直保留**到下一次生成，颜色变淡。
+- 悬停：每段都有明细（token 数、耗时、缓存 read / write / new）。
+- 标题栏空间不足时自动切换紧凑格式：`~41 · 38 · 0.9s · 87%`。
 
 插件 id：`blinkspark-tps-meter`。测试于 OpenCode Desktop `2.2.5`。
 
@@ -46,7 +50,7 @@ OpenCode Desktop 只从全局 `opencode.json(c)` 加载 GUI 插件。
 
 | 选项 | 默认 | 说明 |
 | --- | --- | --- |
-| `countReasoning` | `true` | 是否把 reasoning tokens 计入速度与总量；关闭时 reasoning 流式增量也会被忽略 |
+| `countReasoning` | `true` | 是否把 reasoning tokens 计入 TPS 与总量；关闭时 reasoning 流式增量会被忽略，但 TTFT 仍把 reasoning delta 视作首个 token |
 
 ## 本地开发
 
@@ -81,24 +85,28 @@ npm publish        # publishConfig 已指定官方源与 public
 ```
 src/index.ts         服务端部分（Plugin.define，id: blinkspark-tps-meter）
 src/gui.tsx          GUI 入口：注册样式与 session.header slot
-src/gui/badge.tsx    TPS 状态机与徽标组件
+src/gui/badge.tsx    TPS / TTFT / 缓存状态机与徽标组件
 src/gui/badge.css    徽标样式
 dist/gui-experimental.cjs  构建产物（GUI 部分必须为单个 CJS 文件）
 ```
 
 ## 计算方式
 
-| 阶段 | 数据来源 | 显示 |
+| 指标 | 数据来源 | 口径 |
 | --- | --- | --- |
-| 生成中 | `session.text.delta` / `session.reasoning.delta` / `session.tool.input.delta` 的字符数，2 秒滑动窗口 | 估算值，带 `~` |
-| 每步结束 | `session.step.ended.data.tokens`，耗时取首个 delta 到最后一个 delta（排除首 token 等待） | 精确值 |
-| 空闲 | 保留上一步结果 | 淡显 |
+| 实时 TPS | `session.text.delta` / `session.reasoning.delta` / `session.tool.input.delta` 的字符数，2 秒滑动窗口 | 估算值，带 `~` |
+| 上一轮平均 | `session.step.ended.data.tokens` | `(output + reasoning) / (最后一个 delta - 第一个计入的 delta)`，排除 TTFT |
+| 首 token 延迟 | `session.step.started.data.started` → 第一个 delta | 任意类型的 delta，即使 `countReasoning: false` 也算 |
+| 缓存命中率 | 会话累计 `tokens` | `cache.read / (input + cache.read + cache.write)` |
 
-隐藏 reasoning 的模型（有 reasoning token 但没有 reasoning 流式事件）会回退为整个请求耗时，避免速度虚高。
+`tokens.input` 是非缓存输入，所以分母要把 `cache.read` 和 `cache.write` 加回来。缓存率是**会话累计**，切换会话会跟着变；首次请求通常是 0%。
+
+隐藏 reasoning 的模型（有 reasoning token 但没有 reasoning 流式事件）会回退为整个请求耗时来计算平均速度，避免虚高；TTFT 只能量到首个可见 delta，会标成 `~`。
 
 ## 已知限制
 
 - 实时值是估算，最终以服务端 token 统计为准。
+- 缓存命中率依赖服务端上报的会话累计 token；模型或平台不返回 cache 字段时该段不显示。
 - 只作用于 OpenCode Desktop；TUI 不加载 GUI 部分。
 - GUI 插件 API 目前是实验性的（`gui-experimental`），OpenCode 大版本升级后可能需要适配。
 - 远程 server 场景下，客户端与服务器时钟偏差会影响实时估算（最终值不受影响）。

@@ -1,4 +1,6 @@
 .opencode-tps-badge {
+  display: inline-flex;
+  align-items: baseline;
   margin-left: 6px;
   color: inherit;
   font-size: 11px;
@@ -6,9 +8,18 @@
   line-height: 1;
   white-space: nowrap;
   user-select: none;
+}
+
+.opencode-tps-item {
   opacity: 0.5;
 }
 
-.opencode-tps-badge[data-live="true"] {
-  opacity: 0.85;
+.opencode-tps-item[data-live="true"] {
+  opacity: 0.9;
+}
+
+.opencode-tps-item + .opencode-tps-item::before {
+  content: "·";
+  margin: 0 6px;
+  opacity: 0.35;
 }
