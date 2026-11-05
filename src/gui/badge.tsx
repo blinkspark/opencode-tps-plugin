@@ -11,6 +11,7 @@ type Last = {
   tps: number
   tokens: number
   ms: number
+  approx: boolean
 }
 
 type Ttft = {
@@ -28,10 +29,12 @@ type Sample = {
   chars: number
 }
 
-type DeltaKind = "text" | "reasoning" | "tool"
+type DeltaKind = "text" | "reasoning"
 
 const WINDOW_MS = 2_000
 const MIN_SPAN_MS = 350
+const MIN_AVG_SPAN_MS = 500
+const MIN_AVG_DELTAS = 3
 const TICK_MS = 200
 const DEFAULT_CHARS_PER_TOKEN = 4
 const RATIO_MIN = 0.5
@@ -82,8 +85,12 @@ export function TpsBadge(props: TpsBadgeProps) {
   let firstTokenAt = 0
   let firstCountedAt = 0
   let lastDeltaAt = 0
+  let lastActivityAt = 0
+  let streamedAt = 0
   let sawReasoningDelta = false
+  let countedDeltas = 0
   let stepChars = 0
+  let toolChars = 0
   let samples: Sample[] = []
 
   const reset = () => {
@@ -91,9 +98,19 @@ export function TpsBadge(props: TpsBadgeProps) {
     firstTokenAt = 0
     firstCountedAt = 0
     lastDeltaAt = 0
+    lastActivityAt = 0
+    streamedAt = 0
     sawReasoningDelta = false
+    countedDeltas = 0
     stepChars = 0
+    toolChars = 0
     samples = []
+  }
+
+  const markFirstToken = (time: number) => {
+    if (firstTokenAt > 0) return
+    firstTokenAt = time
+    if (startedAt > 0) setLiveTtft(Math.max(0, time - startedAt))
   }
 
   const push = (sessionID: string, delta: string, at: number, kind: DeltaKind) => {
@@ -103,10 +120,7 @@ export function TpsBadge(props: TpsBadgeProps) {
 
     // TTFT is about the first token of any kind, so record it before the
     // countReasoning gate. This also covers reasoning deltas hidden from TPS.
-    if (firstTokenAt === 0) {
-      firstTokenAt = time
-      if (startedAt > 0) setLiveTtft(Math.max(0, time - startedAt))
-    }
+    markFirstToken(time)
 
     if (kind === "reasoning") {
       sawReasoningDelta = true
@@ -115,6 +129,8 @@ export function TpsBadge(props: TpsBadgeProps) {
 
     if (firstCountedAt === 0) firstCountedAt = time
     lastDeltaAt = time
+    lastActivityAt = time
+    countedDeltas += 1
     stepChars += delta.length
     samples.push({ at: time, chars: delta.length })
 
@@ -124,16 +140,28 @@ export function TpsBadge(props: TpsBadgeProps) {
     if (!running()) setRunning(true)
   }
 
+  // Tool arguments are output tokens too, but the server publishes no
+  // `session.tool.input.delta` events. Use the started/ended pair to cover the
+  // time spent generating them, otherwise tool-heavy steps look absurdly fast.
+  const toolStart = (sessionID: string, at: number) => {
+    if (sessionID !== props.session.id) return
+    markFirstToken(at > 0 ? at : Date.now())
+  }
+
+  const toolEnd = (sessionID: string, text: string, at: number) => {
+    if (sessionID !== props.session.id) return
+
+    const time = at > 0 ? at : Date.now()
+    markFirstToken(time)
+    lastActivityAt = Math.max(lastActivityAt, time)
+    toolChars += text.length
+  }
+
   const begin = (sessionID: string, started: number) => {
     if (sessionID !== props.session.id) return
 
+    reset()
     startedAt = started > 0 ? started : Date.now()
-    firstTokenAt = 0
-    firstCountedAt = 0
-    lastDeltaAt = 0
-    sawReasoningDelta = false
-    stepChars = 0
-    samples = []
     setLiveTtft(undefined)
     setRunning(true)
     setTick((value) => value + 1)
@@ -155,18 +183,30 @@ export function TpsBadge(props: TpsBadgeProps) {
     // first delta would inflate the rate. Fall back to the request start instead.
     const hiddenReasoning = tokens.reasoning > 0 && !sawReasoningDelta
     const ignoredReasoning = props.countReasoning && hiddenReasoning
-    const observed = firstCountedAt > 0 && lastDeltaAt >= firstCountedAt
+
+    // The server coalesces deltas (~100ms) and some providers flush whole
+    // chunks at once. A very short window means we only saw part of the stream,
+    // so use the full step duration instead of reporting thousands of tok/s.
+    const timingStart = firstCountedAt > 0 ? firstCountedAt : firstTokenAt
+    const observedEnd = Math.max(streamedAt, lastActivityAt, lastDeltaAt)
+    const observedSpan = timingStart > 0 && observedEnd >= timingStart ? observedEnd - timingStart : 0
+    const reliable =
+      !ignoredReasoning &&
+      countedDeltas >= MIN_AVG_DELTAS &&
+      observedSpan >= MIN_AVG_SPAN_MS
 
     if (produced > 0 && valid) {
-      const from =
-        observed && !ignoredReasoning ? Math.max(startedAt, firstCountedAt) : startedAt
-      const to = observed ? Math.max(from, lastDeltaAt) : end
+      const from = reliable ? Math.max(startedAt, timingStart) : startedAt
+      const to = reliable
+        ? Math.max(from, observedEnd)
+        : Math.max(from, streamedAt > 0 ? streamedAt : end)
       const ms = Math.max(1, to - from)
 
-      setLast({ tps: produced / (ms / 1_000), tokens: produced, ms })
+      setLast({ tps: produced / (ms / 1_000), tokens: produced, ms, approx: !reliable })
 
-      if (stepChars >= 32 && !ignoredReasoning) {
-        const sample = clamp(stepChars / produced, RATIO_MIN, RATIO_MAX)
+      const chars = stepChars + toolChars
+      if (chars >= 32 && !ignoredReasoning) {
+        const sample = clamp(chars / produced, RATIO_MIN, RATIO_MAX)
         ratio = ratio * 0.5 + sample * 0.5
       }
     }
@@ -203,8 +243,17 @@ export function TpsBadge(props: TpsBadgeProps) {
         data.on("session.reasoning.delta", (event) => {
           push(event.data.sessionID, event.data.delta, event.created, "reasoning")
         }),
-        data.on("session.tool.input.delta", (event) => {
-          push(event.data.sessionID, event.data.delta, event.created, "tool")
+        data.on("session.tool.input.started", (event) => {
+          toolStart(event.data.sessionID, event.created)
+        }),
+        data.on("session.tool.input.ended", (event) => {
+          toolEnd(event.data.sessionID, event.data.text, event.created)
+        }),
+        data.on("session.step.streamed", (event) => {
+          if (event.data.sessionID !== props.session.id) return
+          const time = event.created > 0 ? event.created : Date.now()
+          streamedAt = Math.max(streamedAt, time)
+          lastActivityAt = Math.max(lastActivityAt, time)
         }),
         data.on("session.retry.scheduled", (event) => {
           // A retry starts a new attempt: measure TTFT from the retry, not from
@@ -250,14 +299,26 @@ export function TpsBadge(props: TpsBadgeProps) {
     onCleanup(() => clearInterval(timer))
   })
 
-  const live = () => {
+  const estimatedTokens = () => (stepChars + toolChars) / ratio
+
+  const live = (): number | undefined => {
+    if (firstCountedAt === 0) return undefined
+
     const now = Date.now()
-    const from = Math.max(startedAt > 0 ? startedAt : now - WINDOW_MS, now - WINDOW_MS)
+    const from = Math.max(firstCountedAt, now - WINDOW_MS)
 
     let chars = 0
+    let count = 0
     for (const sample of samples) {
-      if (sample.at >= from) chars += sample.chars
+      if (sample.at >= from) {
+        chars += sample.chars
+        count += 1
+      }
     }
+
+    // The window is empty during tool execution or a long pause. Hiding the
+    // segment is better than showing a misleading ~0 tok/s.
+    if (count === 0) return undefined
 
     const span = Math.max(MIN_SPAN_MS, now - from) / 1_000
     return chars / ratio / span
@@ -267,14 +328,13 @@ export function TpsBadge(props: TpsBadgeProps) {
     if (!running()) return undefined
     tick()
 
-    // Before the first token arrives the window is empty; showing ~0 would be
-    // misleading. The TTFT segment covers that phase instead.
-    if (firstCountedAt === 0) return undefined
+    const rate = live()
+    if (rate === undefined) return undefined
 
     const elapsed = startedAt > 0 ? Math.max(0, Date.now() - startedAt) / 1_000 : 0
     return {
-      label: `~${formatRate(live())}${props.compact ? "" : " tok/s"}`,
-      title: `本轮：≈ ${formatTokens(stepChars / ratio)} tok · ${elapsed.toFixed(1)}s`,
+      label: `~${formatRate(rate)}${props.compact ? "" : " tok/s"}`,
+      title: `本轮：≈ ${formatTokens(estimatedTokens())} tok · ${elapsed.toFixed(1)}s`,
     }
   }
 
@@ -282,9 +342,12 @@ export function TpsBadge(props: TpsBadgeProps) {
     const done = last()
     if (!done) return undefined
 
+    const prefix = done.approx ? "~" : ""
     return {
-      label: `${formatRate(done.tps)}${props.compact ? "" : " avg"}`,
-      title: `上一轮：${formatTokens(done.tokens)} tok · ${(done.ms / 1_000).toFixed(1)}s（不含 TTFT）`,
+      label: `${prefix}${formatRate(done.tps)}${props.compact ? "" : " avg"}`,
+      title: done.approx
+        ? `上一轮：${formatTokens(done.tokens)} tok · ${(done.ms / 1_000).toFixed(1)}s（流式分块过粗，按整步耗时估算）`
+        : `上一轮：${formatTokens(done.tokens)} tok · ${(done.ms / 1_000).toFixed(1)}s（不含 TTFT）`,
     }
   }
 
