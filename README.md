@@ -2,15 +2,16 @@
 
 # @blinkspark/opencode-tps-plugin
 
-在 OpenCode Desktop 的**会话标题栏**显示实时 / 上一轮 tokens per second、首 token 延迟和缓存命中率。
+在 OpenCode Desktop 的**会话标题栏**显示实时 / 上一轮 tokens per second、首 token 延迟和缓存命中率；悬停上一轮平均值还能看到本会话累计平均。
 
 - 生成中：`~41 tok/s · 38 avg · TTFT 0.9s · cache 87%`
   - `~41 tok/s`：按最近 2 秒的流式增量估算；字符/token 比例会从上一个完成的 step 自适应学习（中英文、代码混排都能跟得上）。
   - `38 avg`：上一个 step 的平均速度，用服务端真实 token 数计算，排除首 token 等待；流式窗口不可信时会退回整步耗时并标 `~`。
+  - 悬停 `38 avg`：显示本会话累计平均 TPS、已统计的 token / 耗时 / 步数，以及上一轮明细。
   - `TTFT 0.9s`：首 token 延迟。等待首 token 时显示实时累加（`TTFT 1.2s…`）。
   - `cache 87%`：当前会话累计的输入缓存命中率。
-- 每步结束：实时值消失，平均值更新为该步结果，并**一直保留**到下一次生成，颜色变淡。
-- 悬停：每段都有明细（token 数、耗时、缓存 read / write / new）。
+- 每步结束：实时值消失，上一轮平均值更新为该步结果，并**一直保留**到下一次生成，颜色变淡；会话平均同时在悬停信息里累计。
+- 悬停其他段：显示各自的明细（token 数、耗时、缓存 read / write / new）。
 - 标题栏空间不足时自动切换紧凑格式：`~41 · 38 · 0.9s · 87%`。
 
 插件 id：`blinkspark-tps-meter`。测试于 OpenCode Desktop `2.2.5`。
@@ -95,7 +96,8 @@ dist/gui-experimental.cjs  构建产物（GUI 部分必须为单个 CJS 文件�
 | 指标 | 数据来源 | 口径 |
 | --- | --- | --- |
 | 实时 TPS | `session.text.delta` / `session.reasoning.delta` 的字符数，2 秒滑动窗口 | 估算值，带 `~`；2 秒内没有新增量时隐藏，不显示 `~0` |
-| 上一轮平均 | `session.step.ended.data.tokens` | `(output + reasoning) / 流式窗口`，尽量排除 TTFT |
+| 上一轮平均（显示） | `session.step.ended.data.tokens` | `(output + reasoning) / 流式窗口`，尽量排除 TTFT |
+| 会话平均（悬停） | 已加载的 assistant message + `session.step.ended` / `session.step.failed` | `Σ(output + reasoning) / Σ流式窗口`，按 `assistantMessageID` 去重；尽量排除 TTFT 与空闲时间 |
 | 首 token 延迟 | `session.step.started.data.started` → 第一个生成事件 | text / reasoning delta 或 `tool.input.started`；即使 `countReasoning: false` 也算 |
 | 缓存命中率 | 会话累计 `tokens` | `cache.read / (input + cache.read + cache.write)` |
 
@@ -105,10 +107,13 @@ dist/gui-experimental.cjs  构建产物（GUI 部分必须为单个 CJS 文件�
 
 服务端会把增量按约 100ms 合并后发布，且部分 provider 会整块 flush。如果观察窗口短于 500ms、有效 delta 少于 3 个，或模型隐藏了 reasoning，平均值会退回整步耗时（包含 TTFT），并在数字前加 `~`，避免出现几千 tok/s 的假值。TTFT 只能量到首个可见事件，隐藏 reasoning 时会标成 `~`。
 
+会话平均不会主动拉取完整的历史消息，只统计当前已加载的 assistant message（桌面端约最近 20/40 条）和插件之后观测到的 step；如果还有更早的历史未加载，悬停信息会注明。累计耗时中超过一半来自整步估算时，会话平均也会标 `~`。
+
 ## 已知限制
 
 - 实时值是估算，最终以服务端 token 统计为准；2 秒窗口没有新增量时实时段会隐藏。
 - 工具参数的 token 计入平均值分子，其生成时间按 `tool.input.started` / `.ended` 估算；服务端不提供更细的时序。
+- 会话平均只统计已加载的会话消息和插件观测到的 step；不会为了统计去拉取完整历史。
 - 缓存命中率依赖服务端上报的会话累计 token；模型或平台不返回 cache 字段时该段不显示。
 - 只作用于 OpenCode Desktop；TUI 不加载 GUI 部分。
 - GUI 插件 API 目前是实验性的（`gui-experimental`），OpenCode 大版本升级后可能需要适配。

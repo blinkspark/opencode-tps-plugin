@@ -7,11 +7,17 @@ export interface TpsBadgeProps {
   countReasoning: boolean
 }
 
-type Last = {
-  tps: number
+type StepEntry = {
+  id: string
   tokens: number
   ms: number
   approx: boolean
+  at: number
+}
+
+type SessionStat = {
+  countReasoning: boolean
+  entries: Map<string, StepEntry>
 }
 
 type Ttft = {
@@ -40,6 +46,54 @@ const DEFAULT_CHARS_PER_TOKEN = 4
 const RATIO_MIN = 0.5
 const RATIO_MAX = 12
 
+// Session totals outlive the header badge so switching sessions (or remounting
+// the header) does not throw away what we already measured. Keyed by
+// `MountedSession.key`, which is unique across servers.
+const sessionStats = new Map<string, SessionStat>()
+
+function createStat(countReasoning: boolean): SessionStat {
+  return { countReasoning, entries: new Map() }
+}
+
+function mergeStep(stat: SessionStat, step: StepEntry): SessionStat {
+  const previous = stat.entries.get(step.id)
+
+  // Prefer the precise delta-timed measurement once it arrives. The message
+  // store may publish the same step first, with only full-step timing.
+  if (previous) {
+    if (!previous.approx) return stat
+    if (step.approx) return stat
+  }
+
+  const entries = new Map(stat.entries)
+  entries.set(step.id, step)
+  return { ...stat, entries }
+}
+
+function totalsOf(stat: SessionStat) {
+  let tokens = 0
+  let ms = 0
+  let approxMs = 0
+
+  for (const step of stat.entries.values()) {
+    tokens += step.tokens
+    ms += step.ms
+    if (step.approx) approxMs += step.ms
+  }
+
+  return { tokens, ms, approxMs, steps: stat.entries.size }
+}
+
+function latestStep(stat: SessionStat): StepEntry | undefined {
+  let latest: StepEntry | undefined
+
+  for (const step of stat.entries.values()) {
+    if (!latest || step.at >= latest.at) latest = step
+  }
+
+  return latest
+}
+
 function formatRate(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "0"
   if (value >= 10) return String(Math.round(value))
@@ -67,16 +121,49 @@ function formatSeconds(ms: number): string {
   return `${Math.round(ms / 1_000)}s`
 }
 
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0s"
+  if (ms < 60_000) return formatSeconds(ms)
+
+  const seconds = Math.round(ms / 1_000)
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return rest === 0 ? `${minutes}m` : `${minutes}m ${rest}s`
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
 
 export function TpsBadge(props: TpsBadgeProps) {
   const [running, setRunning] = createSignal(false)
-  const [last, setLast] = createSignal<Last>()
   const [lastTtft, setLastTtft] = createSignal<Ttft>()
   const [liveTtft, setLiveTtft] = createSignal<number>()
   const [tick, setTick] = createSignal(0)
+
+  const ensureStat = (key: string) => {
+    let stat = sessionStats.get(key)
+
+    // The option is read once per plugin setup; if it changes on a hot reload,
+    // start over rather than mixing reasoning counts.
+    if (!stat || stat.countReasoning !== props.countReasoning) {
+      stat = createStat(props.countReasoning)
+      sessionStats.set(key, stat)
+    }
+
+    return stat
+  }
+
+  const [sessionStat, setSessionStat] = createSignal<SessionStat>(ensureStat(props.session.key))
+
+  const recordStep = (step: StepEntry) => {
+    const key = props.session.key
+    const current = ensureStat(key)
+    const next = mergeStep(current, step)
+
+    if (next !== current) sessionStats.set(key, next)
+    setSessionStat(next === current ? current : next)
+  }
 
   // Characters per token, learned from the previous completed step. Providers and
   // languages differ a lot, so an adaptive ratio beats a fixed one.
@@ -169,6 +256,7 @@ export function TpsBadge(props: TpsBadgeProps) {
 
   const finish = (
     sessionID: string,
+    assistantMessageID: string,
     tokens: { output: number; reasoning: number },
     at: number,
   ) => {
@@ -202,7 +290,13 @@ export function TpsBadge(props: TpsBadgeProps) {
         : Math.max(from, streamedAt > 0 ? streamedAt : end)
       const ms = Math.max(1, to - from)
 
-      setLast({ tps: produced / (ms / 1_000), tokens: produced, ms, approx: !reliable })
+      recordStep({
+        id: assistantMessageID,
+        tokens: produced,
+        ms,
+        approx: !reliable,
+        at: end,
+      })
 
       const chars = stepChars + toolChars
       if (chars >= 32 && !ignoredReasoning) {
@@ -261,11 +355,14 @@ export function TpsBadge(props: TpsBadgeProps) {
           begin(event.data.sessionID, event.data.at)
         }),
         data.on("session.step.ended", (event) => {
-          finish(event.data.sessionID, event.data.tokens, event.created)
+          finish(event.data.sessionID, event.data.assistantMessageID, event.data.tokens, event.created)
         }),
         data.on("session.step.failed", (event) => {
-          if (event.data.tokens) finish(event.data.sessionID, event.data.tokens, event.created)
-          else stop(event.data.sessionID)
+          if (event.data.tokens) {
+            finish(event.data.sessionID, event.data.assistantMessageID, event.data.tokens, event.created)
+          } else {
+            stop(event.data.sessionID)
+          }
         }),
         data.on("session.idle", (event) => {
           stop(event.data.sessionID)
@@ -287,9 +384,42 @@ export function TpsBadge(props: TpsBadgeProps) {
     props.session.key
     reset()
     setRunning(false)
-    setLast(undefined)
     setLastTtft(undefined)
     setLiveTtft(undefined)
+  })
+
+  // Seed session totals from the transcript already loaded in the client. Later
+  // steps arrive through `session.step.ended`; this also catches steps that
+  // finished while another session was routed.
+  createEffect(() => {
+    const key = props.session.key
+    const data = props.session.server.data
+    const messages = data.session.message.list(props.session.id)
+    let stat = ensureStat(key)
+
+    for (const message of messages) {
+      if (message.type !== "assistant" || !message.tokens) continue
+
+      const end = message.time.streamed ?? message.time.completed
+      if (!end) continue
+
+      const produced = Math.max(
+        0,
+        message.tokens.output + (props.countReasoning ? message.tokens.reasoning : 0),
+      )
+      if (produced <= 0) continue
+
+      stat = mergeStep(stat, {
+        id: message.id,
+        tokens: produced,
+        ms: Math.max(1, end - message.time.created),
+        approx: true,
+        at: end,
+      })
+    }
+
+    if (stat !== sessionStats.get(key)) sessionStats.set(key, stat)
+    setSessionStat(stat)
   })
 
   createEffect(() => {
@@ -339,15 +469,29 @@ export function TpsBadge(props: TpsBadgeProps) {
   }
 
   const avgView = (): Metric | undefined => {
-    const done = last()
+    const stat = sessionStat()
+    const done = latestStep(stat)
     if (!done) return undefined
 
+    const totals = totalsOf(stat)
+    const sessionSuffix = totals.approxMs > totals.ms / 2 ? "~" : ""
+    const sessionTps = totals.tokens / (Math.max(1, totals.ms) / 1_000)
+    const lastTps = done.tokens / (Math.max(1, done.ms) / 1_000)
     const prefix = done.approx ? "~" : ""
+
+    const title = [
+      `本会话平均：${sessionSuffix}${formatRate(sessionTps)} tok/s`,
+      `已统计 ${formatTokens(totals.tokens)} tok / ${formatDuration(totals.ms)} · ${totals.steps} 步`,
+      ...(totals.approxMs > 0 ? ["部分 step 按整步耗时估算"] : []),
+      `上一轮：${prefix}${formatRate(lastTps)} tok/s（${formatTokens(done.tokens)} tok / ${formatSeconds(done.ms)}${done.approx ? "，整步估算" : "，不含 TTFT"}）`,
+      ...(props.session.server.data.session.message.more(props.session.id)
+        ? ["仅统计已加载的消息，更早的历史未计入"]
+        : []),
+    ].join("\n")
+
     return {
-      label: `${prefix}${formatRate(done.tps)}${props.compact ? "" : " avg"}`,
-      title: done.approx
-        ? `上一轮：${formatTokens(done.tokens)} tok · ${(done.ms / 1_000).toFixed(1)}s（流式分块过粗，按整步耗时估算）`
-        : `上一轮：${formatTokens(done.tokens)} tok · ${(done.ms / 1_000).toFixed(1)}s（不含 TTFT）`,
+      label: `${prefix}${formatRate(lastTps)}${props.compact ? "" : " avg"}`,
+      title,
     }
   }
 
