@@ -107,7 +107,7 @@ dist/gui-experimental.cjs  构建产物（GUI 部分必须为单个 CJS 文件�
 | 实时 TPS | `session.text.delta` / `session.reasoning.delta` 的字符数，2 秒滑动窗口 | 估算值，带 `~`；字符/token 比例从上一个完成的 step 自适应学习 |
 | 上一轮平均 | `session.step.ended.data.tokens` | `(output + reasoning) / 生成窗口`，排除 TTFT 与长等待 |
 | 本会话平均 | 已加载的 assistant message + 观测到的 `session.step.ended` / `session.step.failed` | `Σ(output + reasoning) / Σ生成窗口`，按 `assistantMessageID` 去重；长等待不计入分母 |
-| 首 token 延迟 | `session.step.started.data.started` → 首个生成事件 | text / reasoning 的 `started` / `delta` 或 `tool.input.started`；即使 `countReasoning: false` 也算 |
+| 首 token 延迟 | `session.step.started.data.started` → 首个 text / reasoning 事件 | **只认 text / reasoning 的 `started` / `delta`**；工具调用参数只用于生成窗口，不计入 TTFT；即使 `countReasoning: false` 也算 |
 | 缓存命中率 | 会话累计 `tokens` | `cache.read / (input + cache.read + cache.write)` |
 
 `tokens.input` 是非缓存输入，所以分母要把 `cache.read` 和 `cache.write` 加回来。缓存率是**会话累计**，切换会话会跟着变；首次请求通常是 0%。
@@ -120,11 +120,14 @@ dist/gui-experimental.cjs  构建产物（GUI 部分必须为单个 CJS 文件�
 
 会话平均不会主动拉取完整的历史消息，只统计当前已加载的 assistant message（桌面端约最近 20/40 条）和插件之后观测到的 step；如果还有更早的历史未加载，悬停信息会注明。累计耗时中超过一半来自估算时，会话平均也会标 `~`。
 
+纯工具调用的 step 没有 text / reasoning token，TTFT 会沿用上一步的值，并在 tooltip 注明「本步只有工具调用，沿用上一步」；该 step 的生成窗口仍从工具参数开始，因此不影响平均速度。
+
 `session.retry.scheduled` 不参与计时：它的 `at` 是未来的 `nextRetryAt`，每次重试都会紧随一个新的 `session.step.started`。
 
 ## 已知限制
 
 - 实时值是估算，最终以服务端 token 统计为准。
+- TTFT 只统计 text / reasoning 的首 token；纯工具调用的 step 沿用上一步的值（tooltip 会标注）。
 - 工具参数的 token 计入平均值分子，其生成时间按 `tool.input.started` / `.ended` 估算；服务端不提供更细的时序。
 - 会话平均只统计已加载的会话消息和插件观测到的 step；**已加载的历史消息没有 `firstTokenAt`，无法拆分等待，仍按整步耗时并标 `~`**。不会为了统计去拉取完整历史。
 - 插件在内存中最多保留 32 个会话的统计（LRU 淘汰）；更早的会话切回来后需从已加载消息重新补齐。

@@ -18,11 +18,16 @@ export interface TtftInfo {
   ms: number
   approx: boolean
   longWait: boolean
+  /** The step produced no text/reasoning, so this value is the previous one. */
+  stale: boolean
 }
 
 export interface LiveState {
   startedAt: number
-  firstTokenAt: number
+  /** First output of any kind: drives the generation window and averages. */
+  firstOutputAt: number
+  /** First text/reasoning output only: drives TTFT. */
+  firstTextAt: number
   firstCountedAt: number
   lastDeltaAt: number
   lastActivityAt: number
@@ -88,7 +93,8 @@ export function key(serverID: string, sessionID: string): string {
 function freshLive(ratio = DEFAULT_CHARS_PER_TOKEN): LiveState {
   return {
     startedAt: 0,
-    firstTokenAt: 0,
+    firstOutputAt: 0,
+    firstTextAt: 0,
     firstCountedAt: 0,
     lastDeltaAt: 0,
     lastActivityAt: 0,
@@ -204,9 +210,15 @@ export function seedStep(
   if (changed) notify(state)
 }
 
-function markFirstToken(live: LiveState, time: number) {
-  if (live.firstTokenAt > 0) return
-  live.firstTokenAt = time
+function markFirstOutput(live: LiveState, time: number) {
+  if (live.firstOutputAt > 0) return
+  live.firstOutputAt = time
+}
+
+function markFirstText(live: LiveState, time: number) {
+  markFirstOutput(live, time)
+  if (live.firstTextAt > 0) return
+  live.firstTextAt = time
 }
 
 function begin(serverID: string, sessionID: string, started: number) {
@@ -230,9 +242,9 @@ function push(
   const live = state.live
   const time = at > 0 ? at : Date.now()
 
-  // TTFT is about the first token of any kind, so record it before the
-  // countReasoning gate. Reasoning hidden from TPS still counts here.
-  markFirstToken(live, time)
+  // TTFT only counts text/reasoning, so record it before the countReasoning
+  // gate. Reasoning hidden from TPS still counts as the first text token.
+  markFirstText(live, time)
 
   if (kind === "reasoning") {
     live.sawReasoningOutput = true
@@ -260,14 +272,16 @@ function push(
 
 function toolStart(serverID: string, sessionID: string, at: number) {
   const state = ensure(key(serverID, sessionID))
-  markFirstToken(state.live, at > 0 ? at : Date.now())
+  // Tool-call arguments count as output tokens for the generation window, but
+  // they are not text/reasoning, so they never set TTFT.
+  markFirstOutput(state.live, at > 0 ? at : Date.now())
   notify(state)
 }
 
 function toolEnd(serverID: string, sessionID: string, text: string, at: number) {
   const state = ensure(key(serverID, sessionID))
   const time = at > 0 ? at : Date.now()
-  markFirstToken(state.live, time)
+  markFirstOutput(state.live, time)
   state.live.lastActivityAt = Math.max(state.live.lastActivityAt, time)
   state.live.toolChars += text.length
   notify(state)
@@ -307,7 +321,7 @@ function finish(
 
     const measured = measureStep({
       startedAt: live.startedAt,
-      firstTokenAt: live.firstTokenAt,
+      firstOutputAt: live.firstOutputAt,
       firstCountedAt: live.firstCountedAt,
       lastDeltaAt: live.lastDeltaAt,
       lastActivityAt: live.lastActivityAt,
@@ -338,13 +352,18 @@ function finish(
       }
     }
 
-    if (live.firstTokenAt > 0) {
-      const ms = Math.max(0, live.firstTokenAt - live.startedAt)
+    if (live.firstTextAt > 0) {
+      const ms = Math.max(0, live.firstTextAt - live.startedAt)
       state.ttft = {
         ms,
         approx: hiddenReasoning,
         longWait: ms > LONG_WAIT_MS,
+        stale: false,
       }
+    } else if (state.ttft) {
+      // Tool-only step: keep the last text-token latency but mark it so the
+      // tooltip does not pretend it belongs to this step.
+      state.ttft = { ...state.ttft, stale: true }
     }
   }
 
@@ -383,12 +402,12 @@ export function attach(data: Data, serverID: string) {
     })
     data.on("session.text.started", (event) => {
       const state = ensure(key(serverID, event.data.sessionID))
-      markFirstToken(state.live, event.created)
+      markFirstText(state.live, event.created)
       notify(state)
     })
     data.on("session.reasoning.started", (event) => {
       const state = ensure(key(serverID, event.data.sessionID))
-      markFirstToken(state.live, event.created)
+      markFirstText(state.live, event.created)
       state.live.sawReasoningOutput = true
       notify(state)
     })

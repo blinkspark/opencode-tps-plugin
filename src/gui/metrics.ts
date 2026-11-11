@@ -40,7 +40,8 @@ export interface Totals {
 
 export interface StepTimingInput {
   startedAt: number
-  firstTokenAt: number
+  /** First output of any kind (text, reasoning, or tool-call arguments). */
+  firstOutputAt: number
   firstCountedAt: number
   lastDeltaAt: number
   lastActivityAt: number
@@ -138,7 +139,7 @@ export function liveRate(
 export function measureStep(input: StepTimingInput): StepMeasurement {
   const {
     startedAt,
-    firstTokenAt,
+    firstOutputAt,
     firstCountedAt,
     lastDeltaAt,
     lastActivityAt,
@@ -148,13 +149,13 @@ export function measureStep(input: StepTimingInput): StepMeasurement {
     end,
   } = input
 
-  const timingStart = firstCountedAt > 0 ? firstCountedAt : firstTokenAt
+  const timingStart = firstCountedAt > 0 ? firstCountedAt : firstOutputAt
   const observedEnd = Math.max(streamedAt, lastActivityAt, lastDeltaAt)
   const observedSpan = timingStart > 0 && observedEnd >= timingStart ? observedEnd - timingStart : 0
   const reliable =
     !ignoredReasoning && countedDeltas >= MIN_AVG_DELTAS && observedSpan >= MIN_AVG_SPAN_MS
 
-  const waitMs = startedAt > 0 && firstTokenAt > 0 ? Math.max(0, firstTokenAt - startedAt) : 0
+  const waitMs = startedAt > 0 && firstOutputAt > 0 ? Math.max(0, firstOutputAt - startedAt) : 0
   const longWait = waitMs > LONG_WAIT_MS
 
   let genMs: number
@@ -166,7 +167,7 @@ export function measureStep(input: StepTimingInput): StepMeasurement {
     // that flushes one big chunk would otherwise divide by a near-zero span,
     // so keep a floor; a step with no visible event at all falls back to the
     // full duration and is marked approximate.
-    const from = timingStart > 0 ? timingStart : firstTokenAt > 0 ? firstTokenAt : startedAt
+    const from = timingStart > 0 ? timingStart : firstOutputAt > 0 ? firstOutputAt : startedAt
     const span = observedEnd > from ? observedEnd - from : 0
     genMs =
       from > 0 && span > 0

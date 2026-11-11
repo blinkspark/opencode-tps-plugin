@@ -156,8 +156,8 @@ export function TpsBadge(props: TpsBadgeProps) {
     const state = tracker.snapshot(props.session.server.id, props.session.id)
 
     if (state.running) {
-      if (state.live.firstTokenAt > 0 && state.live.startedAt > 0) {
-        const measured = Math.max(0, state.live.firstTokenAt - state.live.startedAt)
+      if (state.live.firstTextAt > 0 && state.live.startedAt > 0) {
+        const measured = Math.max(0, state.live.firstTextAt - state.live.startedAt)
         return {
           label: `TTFT ${formatSeconds(measured)}`,
           title: "首个 token 延迟",
@@ -180,11 +180,13 @@ export function TpsBadge(props: TpsBadgeProps) {
 
     const mark = done.approx || done.longWait ? "~" : ""
     const value = `${mark}${formatSeconds(done.ms)}`
-    const title = done.longWait
-      ? `首个 token：${value}（含排队/等待，非纯生成延迟）`
-      : done.approx
-        ? `首个 token：${value}（reasoning 未流式输出，实际可能更早）`
-        : `首个 token：${value}`
+    const notes = [
+      ...(done.stale ? ["本步只有工具调用，沿用上一步"] : []),
+      ...(done.longWait ? ["含排队/等待，非纯生成延迟"] : []),
+      ...(done.approx ? ["reasoning 未流式输出，实际可能更早"] : []),
+    ]
+    const title =
+      notes.length > 0 ? `首个 token：${value}（${notes.join("；")}）` : `首个 token：${value}`
 
     return {
       label: props.compact ? value : `TTFT ${value}`,
