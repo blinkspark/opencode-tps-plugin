@@ -18,6 +18,11 @@
   opacity: 0.9;
 }
 
+/* Previous-step value shown only because the live window is empty. */
+.opencode-tps-item[data-fallback="true"] {
+  opacity: 0.3;
+}
+
 .opencode-tps-item + .opencode-tps-item::before {
   content: "·";
   margin: 0 6px;

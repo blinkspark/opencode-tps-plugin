@@ -2,17 +2,24 @@
 
 # @blinkspark/opencode-tps-plugin
 
-在 OpenCode Desktop 的**会话标题栏**显示实时 / 上一轮 tokens per second、首 token 延迟和缓存命中率；悬停上一轮平均值还能看到本会话累计平均。
+在 OpenCode Desktop 的**会话标题栏**显示实时 / 上一轮 / 本会话平均 tokens per second、首 token 延迟和缓存命中率。
 
-- 生成中：`~41 tok/s · 38 avg · TTFT 0.9s · cache 87%`
-  - `~41 tok/s`：按最近 2 秒的流式增量估算；字符/token 比例会从上一个完成的 step 自适应学习（中英文、代码混排都能跟得上）。
-  - `38 avg`：上一个 step 的平均速度，用服务端真实 token 数计算，排除首 token 等待；流式窗口不可信时会退回整步耗时并标 `~`。
-  - 悬停 `38 avg`：显示本会话累计平均 TPS、已统计的 token / 耗时 / 步数，以及上一轮明细。
-  - `TTFT 0.9s`：首 token 延迟。等待首 token 时显示实时累加（`TTFT 1.2s…`）。
-  - `cache 87%`：当前会话累计的输入缓存命中率。
-- 每步结束：实时值消失，上一轮平均值更新为该步结果，并**一直保留**到下一次生成，颜色变淡；会话平均同时在悬停信息里累计。
-- 悬停其他段：显示各自的明细（token 数、耗时、缓存 read / write / new）。
-- 标题栏空间不足时自动切换紧凑格式：`~41 · 38 · 0.9s · 87%`。
+四段，单行：
+
+- 生成中：`~41 tok/s · 42 sess · TTFT 0.9s · cache 87%`
+- 结束后：`38 avg · 42 sess · TTFT 0.9s · cache 87%`
+- 紧凑：`~41 · 42 · 0.9s · 87%` / `38 · 42 · 0.9s · 87%`
+
+| 段 | 显示 | 说明 |
+| --- | --- | --- |
+| 实时 / 上一轮（合并） | 生成中 `~41 tok/s`，结束后 `38 avg` | 两段共用一个位置，互斥显示。生成中但 2 秒窗口没有新增量（等首 token、工具执行）时回退显示上一轮并置灰 |
+| 本会话平均 | `42 sess` | 始终显示；估算值带 `~` |
+| TTFT | `TTFT 0.9s` | 首 token 延迟；等待首 token 时实时累加（`TTFT 1.2s…`） |
+| 缓存 | `cache 87%` | 当前会话累计的输入缓存命中率 |
+
+- 悬停：合并段显示本轮 / 上一轮明细；会话平均段显示已统计 token、耗时、步数、长等待与估算说明；TTFT / 缓存段显示各自明细。
+- 每步结束：实时值切回上一轮平均值，并**一直保留**到下一次生成，颜色变淡；会话平均同时累计。
+- 切换会话或 tab 后统计不会丢失：事件由全局 tracker 按 `sessionID` 分桶记录，状态保存在插件内。
 
 插件 id：`blinkspark-tps-meter`。测试于 OpenCode Desktop `2.2.5`。
 
@@ -51,7 +58,7 @@ OpenCode Desktop 只从全局 `opencode.json(c)` 加载 GUI 插件。
 
 | 选项 | 默认 | 说明 |
 | --- | --- | --- |
-| `countReasoning` | `true` | 是否把 reasoning tokens 计入 TPS 与总量；关闭时 reasoning 流式增量会被忽略，但 TTFT 仍把 reasoning delta 视作首个 token |
+| `countReasoning` | `true` | 是否把 reasoning tokens 计入 TPS 与总量；关闭时 reasoning 流式增量会被忽略，但 TTFT 仍把 reasoning 事件视作首个 token |
 
 ## 本地开发
 
@@ -86,7 +93,9 @@ npm publish        # publishConfig 已指定官方源与 public
 ```
 src/index.ts         服务端部分（Plugin.define，id: blinkspark-tps-meter）
 src/gui.tsx          GUI 入口：注册样式与 session.header slot
-src/gui/badge.tsx    TPS / TTFT / 缓存状态机与徽标组件
+src/gui/badge.tsx    视图：四段渲染、合并逻辑、tooltip
+src/gui/tracker.ts   全局事件订阅、按 sessionID 分桶的状态机
+src/gui/metrics.ts   纯计算：窗口、等待拆分、汇总、格式化
 src/gui/badge.css    徽标样式
 dist/gui-experimental.cjs  构建产物（GUI 部分必须为单个 CJS 文件）
 ```
@@ -95,25 +104,30 @@ dist/gui-experimental.cjs  构建产物（GUI 部分必须为单个 CJS 文件�
 
 | 指标 | 数据来源 | 口径 |
 | --- | --- | --- |
-| 实时 TPS | `session.text.delta` / `session.reasoning.delta` 的字符数，2 秒滑动窗口 | 估算值，带 `~`；2 秒内没有新增量时隐藏，不显示 `~0` |
-| 上一轮平均（显示） | `session.step.ended.data.tokens` | `(output + reasoning) / 流式窗口`，尽量排除 TTFT |
-| 会话平均（悬停） | 已加载的 assistant message + `session.step.ended` / `session.step.failed` | `Σ(output + reasoning) / Σ流式窗口`，按 `assistantMessageID` 去重；尽量排除 TTFT 与空闲时间 |
-| 首 token 延迟 | `session.step.started.data.started` → 第一个生成事件 | text / reasoning delta 或 `tool.input.started`；即使 `countReasoning: false` 也算 |
+| 实时 TPS | `session.text.delta` / `session.reasoning.delta` 的字符数，2 秒滑动窗口 | 估算值，带 `~`；字符/token 比例从上一个完成的 step 自适应学习 |
+| 上一轮平均 | `session.step.ended.data.tokens` | `(output + reasoning) / 生成窗口`，排除 TTFT 与长等待 |
+| 本会话平均 | 已加载的 assistant message + 观测到的 `session.step.ended` / `session.step.failed` | `Σ(output + reasoning) / Σ生成窗口`，按 `assistantMessageID` 去重；长等待不计入分母 |
+| 首 token 延迟 | `session.step.started.data.started` → 首个生成事件 | text / reasoning 的 `started` / `delta` 或 `tool.input.started`；即使 `countReasoning: false` 也算 |
 | 缓存命中率 | 会话累计 `tokens` | `cache.read / (input + cache.read + cache.write)` |
 
 `tokens.input` 是非缓存输入，所以分母要把 `cache.read` 和 `cache.write` 加回来。缓存率是**会话累计**，切换会话会跟着变；首次请求通常是 0%。
 
-平均值的流式窗口优先使用 `session.step.streamed`（stream 结束时刻），并覆盖 `session.tool.input.started` / `.ended`，因为工具参数的 token 也计入 `tokens.output`，但服务端不会发送 `tool.input.delta`。
+生成窗口优先使用 `session.step.streamed`（stream 结束时刻），并覆盖 `session.tool.input.started` / `.ended`，因为工具参数的 token 也计入 `tokens.output`，但服务端不会发送 `tool.input.delta`。
 
-服务端会把增量按约 100ms 合并后发布，且部分 provider 会整块 flush。如果观察窗口短于 500ms、有效 delta 少于 3 个，或模型隐藏了 reasoning，平均值会退回整步耗时（包含 TTFT），并在数字前加 `~`，避免出现几千 tok/s 的假值。TTFT 只能量到首个可见事件，隐藏 reasoning 时会标成 `~`。
+服务端会把增量按约 100ms 合并后发布，且部分 provider 会整块 flush。如果观察窗口短于 500ms、有效 delta 少于 3 个，或模型隐藏了 reasoning，平均值会按「首个可见 token → stream 结束」计算并标 `~`（设 250ms 下限，避免除出几千 tok/s）；**只有完全没有可见事件的 step 才退回整步耗时**。整步耗时不再包含 TTFT 与排队等待。
 
-会话平均不会主动拉取完整的历史消息，只统计当前已加载的 assistant message（桌面端约最近 20/40 条）和插件之后观测到的 step；如果还有更早的历史未加载，悬停信息会注明。累计耗时中超过一半来自整步估算时，会话平均也会标 `~`。
+**长等待**：请求开始到首个可见 token 超过 10 秒（provider 排队、限流、代理等待、隐藏 reasoning）时，等待时间单独记录，**不计入生成窗口，也不计入会话平均的分母**；TTFT 会标 `~` 并注明「含排队/等待，非纯生成延迟」，会话平均的 tooltip 会列出未计入的等待总时长。这一步不会再把 108 秒的等待显示成 `~1.8 avg`。
+
+会话平均不会主动拉取完整的历史消息，只统计当前已加载的 assistant message（桌面端约最近 20/40 条）和插件之后观测到的 step；如果还有更早的历史未加载，悬停信息会注明。累计耗时中超过一半来自估算时，会话平均也会标 `~`。
+
+`session.retry.scheduled` 不参与计时：它的 `at` 是未来的 `nextRetryAt`，每次重试都会紧随一个新的 `session.step.started`。
 
 ## 已知限制
 
-- 实时值是估算，最终以服务端 token 统计为准；2 秒窗口没有新增量时实时段会隐藏。
+- 实时值是估算，最终以服务端 token 统计为准。
 - 工具参数的 token 计入平均值分子，其生成时间按 `tool.input.started` / `.ended` 估算；服务端不提供更细的时序。
-- 会话平均只统计已加载的会话消息和插件观测到的 step；不会为了统计去拉取完整历史。
+- 会话平均只统计已加载的会话消息和插件观测到的 step；**已加载的历史消息没有 `firstTokenAt`，无法拆分等待，仍按整步耗时并标 `~`**。不会为了统计去拉取完整历史。
+- 插件在内存中最多保留 32 个会话的统计（LRU 淘汰）；更早的会话切回来后需从已加载消息重新补齐。
 - 缓存命中率依赖服务端上报的会话累计 token；模型或平台不返回 cache 字段时该段不显示。
 - 只作用于 OpenCode Desktop；TUI 不加载 GUI 部分。
 - GUI 插件 API 目前是实验性的（`gui-experimental`），OpenCode 大版本升级后可能需要适配。
