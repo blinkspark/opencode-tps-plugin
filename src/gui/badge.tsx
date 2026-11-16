@@ -154,13 +154,20 @@ export function TpsBadge(props: TpsBadgeProps) {
     tick()
 
     const state = tracker.snapshot(props.session.server.id, props.session.id)
+    const average = state.ttftAverage
+    const averageLine =
+      average.steps > 0
+        ? `平均：${formatSeconds(average.totalMs / average.steps)}（${average.steps} 步${
+            average.longWaitSteps > 0 ? `，含 ${average.longWaitSteps} 步长等待` : ""
+          }）`
+        : undefined
 
     if (state.running) {
       if (state.live.firstTextAt > 0 && state.live.startedAt > 0) {
         const measured = Math.max(0, state.live.firstTextAt - state.live.startedAt)
         return {
           label: `TTFT ${formatSeconds(measured)}`,
-          title: "首个 token 延迟",
+          title: ["首个 token 延迟（当前步）", ...(averageLine ? [averageLine] : [])].join("\n"),
         }
       }
 
@@ -168,7 +175,7 @@ export function TpsBadge(props: TpsBadgeProps) {
         const elapsed = Math.max(0, Date.now() - state.live.startedAt)
         return {
           label: `TTFT ${formatSeconds(elapsed)}…`,
-          title: "等待首个 token",
+          title: ["等待首个 token", ...(averageLine ? [averageLine] : [])].join("\n"),
         }
       }
 
@@ -185,12 +192,14 @@ export function TpsBadge(props: TpsBadgeProps) {
       ...(done.longWait ? ["含排队/等待，非纯生成延迟"] : []),
       ...(done.approx ? ["reasoning 未流式输出，实际可能更早"] : []),
     ]
-    const title =
-      notes.length > 0 ? `首个 token：${value}（${notes.join("；")}）` : `首个 token：${value}`
+    const lines = [
+      notes.length > 0 ? `首个 token：${value}（${notes.join("；")}）` : `首个 token：${value}`,
+      ...(averageLine ? [averageLine] : []),
+    ]
 
     return {
       label: props.compact ? value : `TTFT ${value}`,
-      title,
+      title: lines.join("\n"),
     }
   }
 

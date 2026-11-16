@@ -40,11 +40,19 @@ export interface LiveState {
   ratio: number
 }
 
+export interface TtftAverage {
+  totalMs: number
+  steps: number
+  longWaitSteps: number
+}
+
 export interface Snapshot {
   running: boolean
   live: LiveState
   entries: Map<string, StepEntry>
   ttft: TtftInfo | undefined
+  /** Only steps observed live: the transcript has no first-token timestamp. */
+  ttftAverage: TtftAverage
 }
 
 interface SessionState extends Snapshot {
@@ -114,6 +122,7 @@ const EMPTY: Snapshot = {
   live: freshLive(),
   entries: emptyEntries,
   ttft: undefined,
+  ttftAverage: { totalMs: 0, steps: 0, longWaitSteps: 0 },
 }
 
 function ensure(id: string): SessionState {
@@ -123,6 +132,7 @@ function ensure(id: string): SessionState {
     state = {
       entries: new Map(),
       ttft: undefined,
+      ttftAverage: { totalMs: 0, steps: 0, longWaitSteps: 0 },
       live: freshLive(),
       running: false,
       touched: Date.now(),
@@ -181,7 +191,13 @@ export function snapshot(serverID: string, sessionID: string): Snapshot {
   if (!state) return EMPTY
 
   // A fresh object so a memo reading `version()` always propagates.
-  return { running: state.running, live: state.live, entries: state.entries, ttft: state.ttft }
+  return {
+    running: state.running,
+    live: state.live,
+    entries: state.entries,
+    ttft: state.ttft,
+    ttftAverage: state.ttftAverage,
+  }
 }
 
 /** Seed a step from the loaded transcript. Full-step timing is all it has. */
@@ -354,12 +370,18 @@ function finish(
 
     if (live.firstTextAt > 0) {
       const ms = Math.max(0, live.firstTextAt - live.startedAt)
+      const longWait = ms > LONG_WAIT_MS
       state.ttft = {
         ms,
         approx: hiddenReasoning,
-        longWait: ms > LONG_WAIT_MS,
+        longWait,
         stale: false,
       }
+      // Tool-only steps never reach this branch, so they stay out of the
+      // average as well.
+      state.ttftAverage.totalMs += ms
+      state.ttftAverage.steps += 1
+      if (longWait) state.ttftAverage.longWaitSteps += 1
     } else if (state.ttft) {
       // Tool-only step: keep the last text-token latency but mark it so the
       // tooltip does not pretend it belongs to this step.

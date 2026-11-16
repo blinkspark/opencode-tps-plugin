@@ -122,12 +122,15 @@ dist/gui-experimental.cjs  构建产物（GUI 部分必须为单个 CJS 文件�
 
 纯工具调用的 step 没有 text / reasoning token，TTFT 会沿用上一步的值，并在 tooltip 注明「本步只有工具调用，沿用上一步」；该 step 的生成窗口仍从工具参数开始，因此不影响平均速度。
 
+TTFT 主显示**上一轮**（最近一个产出 text / reasoning 的 step）的值；悬停额外显示「平均：1.1s（12 步）」。平均只累计插件观测到的 step（纯 tool-call step 不计入），命中过长等待的 step 会注明「含 N 步长等待」。生成中悬停显示的是已完成 step 的平均，不包含当前步。
+
 `session.retry.scheduled` 不参与计时：它的 `at` 是未来的 `nextRetryAt`，每次重试都会紧随一个新的 `session.step.started`。
 
 ## 已知限制
 
 - 实时值是估算，最终以服务端 token 统计为准。
 - TTFT 只统计 text / reasoning 的首 token；纯工具调用的 step 沿用上一步的值（tooltip 会标注）。
+- TTFT 平均只包含插件观测到的 step；已加载的历史消息没有 first-token 时间戳，无法补算。
 - 工具参数的 token 计入平均值分子，其生成时间按 `tool.input.started` / `.ended` 估算；服务端不提供更细的时序。
 - 会话平均只统计已加载的会话消息和插件观测到的 step；**已加载的历史消息没有 `firstTokenAt`，无法拆分等待，仍按整步耗时并标 `~`**。不会为了统计去拉取完整历史。
 - 插件在内存中最多保留 32 个会话的统计（LRU 淘汰）；更早的会话切回来后需从已加载消息重新补齐。
