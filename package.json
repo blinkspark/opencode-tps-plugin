@@ -43,7 +43,7 @@
     "prepublishOnly": "npm run build && npm run typecheck && npm run verify"
   },
   "dependencies": {
-    "@opencode/plugin": "2.2.5"
+    "@opencode/plugin": "^2.2.5"
   },
   "devDependencies": {
     "@types/node": "^24.12.0",

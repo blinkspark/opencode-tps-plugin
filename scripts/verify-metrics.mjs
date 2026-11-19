@@ -173,7 +173,8 @@ const SES = { sessionID: "ses_test" }
 const snap = () => tracker.snapshot("srv", SES.sessionID)
 
 // Attempt 1 streams text and then fails. Its 500ms latency must not reach the
-// main display or the average.
+// main display or the TTFT average, and its partial tokens must not enter the
+// session average.
 emit("session.step.started", 1_000_000, { ...SES, started: 1_000_000 })
 emit("session.text.delta", 1_000_500, { ...SES, delta: "hello" })
 emit("session.step.failed", 1_001_500, {
@@ -184,6 +185,7 @@ emit("session.step.failed", 1_001_500, {
 
 assert.equal(snap().ttft, undefined, "a failed attempt must not set the main TTFT")
 assert.equal(snap().ttftAverage.steps, 0, "a failed attempt must not enter the average")
+assert.equal(snap().entries.size, 0, "a failed attempt must not enter the session average")
 assert.equal(snap().running, false)
 
 // The retry succeeds: exactly one observation, owned by the retry.
@@ -200,6 +202,8 @@ assert.equal(snap().ttft.ms, 800, "the successful retry owns the TTFT")
 assert.equal(snap().ttft.stale, false)
 assert.equal(snap().ttftAverage.steps, 1, "one completed step, despite two attempts")
 assert.equal(snap().ttftAverage.totalMs, 800)
+assert.equal(snap().entries.size, 1, "only the successful attempt creates an entry")
+assert.equal(snap().entries.get("msg_1")?.tokens, 8, "the retry's tokens, not the failed attempt's")
 
 // A later attempt fails with no text at all: nothing changes, and it must not
 // be mislabelled as a tool-only step.
@@ -214,6 +218,7 @@ emit("session.step.failed", failedAt + 500, {
 assert.equal(snap().ttft.ms, 800, "a later failure keeps the last successful value")
 assert.equal(snap().ttft.stale, false, "a failure is not a tool-only step")
 assert.equal(snap().ttftAverage.steps, 1)
+assert.equal(snap().entries.size, 1, "a failed attempt must not add a session entry")
 
 // A successful tool-only step keeps the previous value, marks it stale, and
 // stays out of the average.

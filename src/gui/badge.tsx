@@ -47,7 +47,9 @@ export function TpsBadge(props: TpsBadgeProps) {
     const messages = data.session.message.list(sessionID)
 
     for (const message of messages) {
-      if (message.type !== "assistant" || !message.tokens) continue
+      // Failed/aborted attempts never count toward the session average, so a
+      // reloaded transcript must not seed them either.
+      if (message.type !== "assistant" || !message.tokens || message.error) continue
 
       const end = message.time.streamed ?? message.time.completed
       if (!end) continue

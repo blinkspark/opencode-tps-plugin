@@ -349,19 +349,25 @@ function finish(
     })
 
     if (produced > 0) {
-      mergeStep(state, {
-        id: assistantMessageID,
-        tokens: produced,
-        genMs: measured.genMs,
-        waitMs: measured.waitMs,
-        approx: measured.approx,
-        longWait: measured.longWait,
-        fromHistory: false,
-        at: end,
-      })
+      // Failed attempts never enter the session average: their partial tokens
+      // describe a step the user never received. The successful retry that
+      // follows records its own numbers.
+      if (!failed) {
+        mergeStep(state, {
+          id: assistantMessageID,
+          tokens: produced,
+          genMs: measured.genMs,
+          waitMs: measured.waitMs,
+          approx: measured.approx,
+          longWait: measured.longWait,
+          fromHistory: false,
+          at: end,
+        })
+      }
 
       // Providers and languages differ a lot, so learn an adaptive
-      // chars/token ratio from the previous completed step.
+      // chars/token ratio from the previous completed step. The ratio is just
+      // calibration, so partial output from a failed attempt still helps.
       const chars = live.stepChars + live.toolChars
       if (chars >= 32 && !ignoredReasoning) {
         const sample = clamp(chars / produced, RATIO_MIN, RATIO_MAX)

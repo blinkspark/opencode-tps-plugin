@@ -108,7 +108,7 @@ dist/gui-experimental.cjs   构建产物（GUI 部分必须为单个 CJS 文件�
 | --- | --- | --- |
 | 实时 TPS | `session.text.delta` / `session.reasoning.delta` 的字符数，2 秒滑动窗口 | 估算值，带 `~`；字符/token 比例从上一个完成的 step 自适应学习 |
 | 上一轮平均 | `session.step.ended.data.tokens` | `(output + reasoning) / 生成窗口`，排除 TTFT 与长等待 |
-| 本会话平均 | 已加载的 assistant message + 观测到的 `session.step.ended` / `session.step.failed` | `Σ(output + reasoning) / Σ生成窗口`，按 `assistantMessageID` 去重；长等待不计入分母 |
+| 本会话平均 | 已加载的 assistant message（跳过出错 / 中止的）+ 观测到的 `session.step.ended` | `Σ(output + reasoning) / Σ生成窗口`，按 `assistantMessageID` 去重；失败 / 重试 attempt 不计入；长等待不计入分母 |
 | 首 token 延迟 | `session.step.started.data.started` → 首个 text / reasoning 事件 | **只认 text / reasoning 的 `started` / `delta`**；工具调用参数只用于生成窗口，不计入 TTFT；即使 `countReasoning: false` 也算；**失败 / 重试的 attempt 不计入** |
 | 缓存命中率 | 会话累计 `tokens` | `cache.read / (input + cache.read + cache.write)` |
 
@@ -126,6 +126,8 @@ dist/gui-experimental.cjs   构建产物（GUI 部分必须为单个 CJS 文件�
 
 TTFT 主显示**上一轮**（最近一个**成功完成**且产出 text / reasoning 的 step）的值；悬停额外显示「平均：1.1s（12 步）」。平均只累计插件观测到、且成功完成的 step：纯 tool-call step 不计入，**失败和重试中失败的 attempt 也不计入**（重试成功后按成功那次计一次）。命中过长等待的 step 会注明「含 N 步长等待」。生成中悬停显示的是已完成 step 的平均，不包含当前步。
 
+会话平均（`sess`）同样只统计成功完成的 step：失败 attempt 的部分 token 不计入，重试成功后按成功那次的 token / 耗时计一次。
+
 `session.retry.scheduled` 不参与计时：它的 `at` 是未来的 `nextRetryAt`，每次重试都会紧随一个新的 `session.step.started`。
 
 ## 已知限制
@@ -136,10 +138,11 @@ TTFT 主显示**上一轮**（最近一个**成功完成**且产出 text / reaso
 - 工具参数的 token 计入平均值分子，其生成时间按 `tool.input.started` / `.ended` 估算；服务端不提供更细的时序。
 - 会话平均只统计已加载的会话消息和插件观测到的 step；**已加载的历史消息没有首 token 时间戳，无法拆分等待，仍按整步耗时并标 `~`**。不会为了统计去拉取完整历史。
 - 中断或执行失败会丢弃正在进行中的 step 的实时统计（没有完成的 `step.ended` / 带 tokens 的 `step.failed`），不会写入会话平均；该 step 在重新加载后由已加载消息补齐。
+- 失败的 attempt（含自动重试前的失败）不计入会话平均；重新加载消息时出错 / 中止的 assistant message 也会跳过。若最终失败且从未成功，该 step 不贡献统计。
 - 插件在内存中最多保留 32 个会话的统计（LRU 淘汰）；更早的会话切回来后需从已加载消息重新补齐。
 - 缓存命中率依赖服务端上报的会话累计 token；模型或平台不返回 cache 字段时该段不显示。
 - 只作用于 OpenCode Desktop；TUI 不加载 GUI 部分。
-- GUI 插件 API 目前是实验性的（`gui-experimental`），OpenCode 大版本升级后可能需要适配。
+- GUI 插件 API 目前是实验性的（`gui-experimental`），插件按 Desktop `2.2.5` 的 API 开发（依赖声明 `^2.2.5`），OpenCode 大版本升级后可能需要适配。
 - 远程 server 场景下，客户端与服务器时钟偏差会影响实时估算（最终值不受影响）。
 
 ## License
