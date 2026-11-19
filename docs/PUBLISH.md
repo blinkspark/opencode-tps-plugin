@@ -21,6 +21,7 @@ cd /e/dev/tps-plugin
 git status                     # 应为 clean
 npm run typecheck
 npm run build
+npm run verify                 # 离线回归：指标计算 + tracker 事件模拟
 npm pack --dry-run             # 检查发布内容
 ```
 
@@ -29,15 +30,18 @@ npm pack --dry-run             # 检查发布内容
 ```
 LICENSE
 README.md
+assets/icon.svg
 dist/gui-experimental.cjs
 package.json
 src/gui.tsx
 src/gui/badge.css
 src/gui/badge.tsx
+src/gui/metrics.ts
+src/gui/tracker.ts
 src/index.ts
 ```
 
-不应出现 `node_modules/`、`package-lock.json`、`*.tgz`。
+不应出现 `node_modules/`、`package-lock.json`、`scripts/`（仅开发用）、`*.tgz`。
 
 ## 2. 登录官方 registry
 

@@ -1,7 +1,7 @@
 {
   "name": "@blinkspark/opencode-tps-plugin",
   "version": "0.1.0",
-  "description": "Shows tokens per second in the OpenCode Desktop session header.",
+  "description": "Shows live TPS, previous-step and session averages, TTFT and cache hit rate in the OpenCode Desktop session header.",
   "type": "module",
   "license": "MIT",
   "author": "BlinkSpark",
@@ -18,6 +18,8 @@
     "opencode-plugin",
     "tps",
     "tokens",
+    "ttft",
+    "cache",
     "desktop"
   ],
   "exports": {
@@ -37,7 +39,8 @@
     "build": "vite build",
     "watch": "vite build --watch",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build && npm run typecheck"
+    "verify": "node --experimental-strip-types scripts/verify-metrics.mjs",
+    "prepublishOnly": "npm run build && npm run typecheck && npm run verify"
   },
   "dependencies": {
     "@opencode/plugin": "2.2.5"

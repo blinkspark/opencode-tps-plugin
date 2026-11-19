@@ -317,6 +317,7 @@ function finish(
   assistantMessageID: string,
   tokens: { output: number; reasoning: number },
   at: number,
+  failed: boolean,
 ) {
   const state = ensure(key(serverID, sessionID))
   const live = state.live
@@ -368,24 +369,30 @@ function finish(
       }
     }
 
-    if (live.firstTextAt > 0) {
-      const ms = Math.max(0, live.firstTextAt - live.startedAt)
-      const longWait = ms > LONG_WAIT_MS
-      state.ttft = {
-        ms,
-        approx: hiddenReasoning,
-        longWait,
-        stale: false,
+    // A failed attempt is not a completed step: it never updates the
+    // previous-step TTFT and never enters the average. The retry's
+    // `session.step.started` resets the live state, and only the successful
+    // attempt records the first-token latency.
+    if (!failed) {
+      if (live.firstTextAt > 0) {
+        const ms = Math.max(0, live.firstTextAt - live.startedAt)
+        const longWait = ms > LONG_WAIT_MS
+        state.ttft = {
+          ms,
+          approx: hiddenReasoning,
+          longWait,
+          stale: false,
+        }
+        // Tool-only steps never reach this branch, so they stay out of the
+        // average as well.
+        state.ttftAverage.totalMs += ms
+        state.ttftAverage.steps += 1
+        if (longWait) state.ttftAverage.longWaitSteps += 1
+      } else if (state.ttft) {
+        // Successful tool-only step: keep the last text-token latency but mark
+        // it so the tooltip does not pretend it belongs to this step.
+        state.ttft = { ...state.ttft, stale: true }
       }
-      // Tool-only steps never reach this branch, so they stay out of the
-      // average as well.
-      state.ttftAverage.totalMs += ms
-      state.ttftAverage.steps += 1
-      if (longWait) state.ttftAverage.longWaitSteps += 1
-    } else if (state.ttft) {
-      // Tool-only step: keep the last text-token latency but mark it so the
-      // tooltip does not pretend it belongs to this step.
-      state.ttft = { ...state.ttft, stale: true }
     }
   }
 
@@ -449,11 +456,14 @@ export function attach(data: Data, serverID: string) {
       streamed(serverID, event.data.sessionID, event.created)
     })
     data.on("session.step.ended", (event) => {
-      finish(serverID, event.data.sessionID, event.data.assistantMessageID, event.data.tokens, event.created)
+      finish(serverID, event.data.sessionID, event.data.assistantMessageID, event.data.tokens, event.created, false)
     })
+    // Partial tokens from a failed attempt still count for the session
+    // average; the `failed` flag keeps the attempt out of TTFT. `tokens` can be
+    // absent when the failure happened before any usage was reported.
     data.on("session.step.failed", (event) => {
       if (event.data.tokens) {
-        finish(serverID, event.data.sessionID, event.data.assistantMessageID, event.data.tokens, event.created)
+        finish(serverID, event.data.sessionID, event.data.assistantMessageID, event.data.tokens, event.created, true)
       } else {
         stop(serverID, event.data.sessionID)
       }

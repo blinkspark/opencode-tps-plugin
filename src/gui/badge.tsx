@@ -188,7 +188,7 @@ export function TpsBadge(props: TpsBadgeProps) {
     const mark = done.approx || done.longWait ? "~" : ""
     const value = `${mark}${formatSeconds(done.ms)}`
     const notes = [
-      ...(done.stale ? ["本步只有工具调用，沿用上一步"] : []),
+      ...(done.stale ? ["上一步只有工具调用，沿用更早一次的值"] : []),
       ...(done.longWait ? ["含排队/等待，非纯生成延迟"] : []),
       ...(done.approx ? ["reasoning 未流式输出，实际可能更早"] : []),
     ]
