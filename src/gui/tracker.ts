@@ -65,6 +65,10 @@ export interface Snapshot {
 interface RuntimeState {
   spans: Span[]
   totalMs: number
+  model: Span[]
+  modelMs: number
+  tool: Span[]
+  toolMs: number
   open: Map<string, OpenSpan>
   capped: number
   /** Keys of transcript intervals already merged, so re-reads stay cheap. */
@@ -139,7 +143,16 @@ function freshLive(ratio = DEFAULT_CHARS_PER_TOKEN): LiveState {
 }
 
 const emptyEntries = new Map<string, StepEntry>()
-const EMPTY_RUN: RunInfo = { spans: [], totalMs: 0, open: [], capped: 0 }
+const EMPTY_RUN: RunInfo = {
+  spans: [],
+  totalMs: 0,
+  modelSpans: [],
+  modelMs: 0,
+  toolSpans: [],
+  toolMs: 0,
+  open: [],
+  capped: 0,
+}
 const EMPTY: Snapshot = {
   running: false,
   live: freshLive(),
@@ -163,6 +176,10 @@ function ensure(id: string): SessionState {
       runtime: {
         spans: [],
         totalMs: 0,
+        model: [],
+        modelMs: 0,
+        tool: [],
+        toolMs: 0,
         open: new Map(),
         capped: 0,
         seeded: new Set(),
@@ -231,6 +248,10 @@ export function snapshot(serverID: string, sessionID: string): Snapshot {
     run: {
       spans: state.runtime.spans,
       totalMs: state.runtime.totalMs,
+      modelSpans: state.runtime.model,
+      modelMs: state.runtime.modelMs,
+      toolSpans: state.runtime.tool,
+      toolMs: state.runtime.toolMs,
       open: Array.from(state.runtime.open.values()),
       capped: state.runtime.capped,
     },
@@ -293,11 +314,14 @@ function closeRunSpan(state: SessionState, span: OpenSpan, end: number) {
   const capped = span.tool && finish - span.start > TOOL_RUN_CAP_MS
   if (capped) finish = span.start + TOOL_RUN_CAP_MS
 
-  const added = insertSpan(state.runtime.spans, span.start, finish)
-  if (added <= 0) return
+  state.runtime.totalMs += insertSpan(state.runtime.spans, span.start, finish)
 
-  state.runtime.totalMs += added
-  if (capped) state.runtime.capped += 1
+  const track = span.tool ? state.runtime.tool : state.runtime.model
+  const trackAdded = insertSpan(track, span.start, finish)
+  if (span.tool) state.runtime.toolMs += trackAdded
+  else state.runtime.modelMs += trackAdded
+
+  if (capped && trackAdded > 0) state.runtime.capped += 1
 }
 
 function closeRun(state: SessionState, key: string, end: number) {
@@ -338,10 +362,14 @@ export function seedRun(
   const capped = tool && finish - start > TOOL_RUN_CAP_MS
   if (capped) finish = start + TOOL_RUN_CAP_MS
 
-  const added = insertSpan(state.runtime.spans, start, finish)
-  if (added <= 0) return
+  state.runtime.totalMs += insertSpan(state.runtime.spans, start, finish)
 
-  state.runtime.totalMs += added
+  const track = tool ? state.runtime.tool : state.runtime.model
+  const trackAdded = insertSpan(track, start, finish)
+  if (tool) state.runtime.toolMs += trackAdded
+  else state.runtime.modelMs += trackAdded
+
+  if (trackAdded <= 0) return
   if (capped) state.runtime.capped += 1
   notify(state)
 }

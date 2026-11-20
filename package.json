@@ -1,7 +1,7 @@
 {
   "name": "@blinkspark/opencode-tps-plugin",
   "version": "0.1.0",
-  "description": "Shows live TPS, previous-step and session averages, TTFT, cache hit rate and active run time in the OpenCode Desktop session header.",
+  "description": "Shows live TPS, previous-step and session averages, active model/tool run time, TTFT and cache hit rate in the OpenCode Desktop session header.",
   "type": "module",
   "license": "MIT",
   "author": "BlinkSpark",

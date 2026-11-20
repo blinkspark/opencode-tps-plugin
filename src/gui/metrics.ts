@@ -53,12 +53,22 @@ export interface OpenSpan {
   tool: boolean
 }
 
-export interface RunInfo {
+/** Closed intervals plus whatever is still running for one kind of work. */
+export interface RunTrack {
   /** Closed intervals, sorted and disjoint. */
   spans: readonly Span[]
   /** Length of `spans`, kept incrementally so rendering stays O(1). */
   totalMs: number
   open: readonly OpenSpan[]
+}
+
+export interface RunInfo extends RunTrack {
+  /** Model step intervals only: request start to stream end. */
+  modelSpans: readonly Span[]
+  modelMs: number
+  /** Tool execution intervals only; each one capped. */
+  toolSpans: readonly Span[]
+  toolMs: number
   /** How many tool intervals hit {@link TOOL_RUN_CAP_MS}. */
   capped: number
 }
@@ -117,7 +127,8 @@ export function formatSeconds(ms: number): string {
 
 export function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms <= 0) return "0s"
-  if (ms < 60_000) return formatSeconds(ms)
+  // 59.5s and above rounds to 60s, which should become `1m`, not `60s`.
+  if (ms < 59_500) return formatSeconds(ms)
 
   const seconds = Math.round(ms / 1_000)
   const minutes = Math.floor(seconds / 60)
@@ -127,6 +138,38 @@ export function formatDuration(ms: number): string {
   const hours = Math.floor(minutes / 60)
   const restMinutes = minutes % 60
   return restMinutes === 0 ? `${hours}h` : `${hours}h ${restMinutes}m`
+}
+
+/** Header-sized duration: no spaces, whole seconds for the first minute. */
+export function formatCompactDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0s"
+
+  const seconds = Math.max(1, Math.round(ms / 1_000))
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  if (minutes === 0) return `${seconds}s`
+  if (minutes < 60) return rest === 0 ? `${minutes}m` : `${minutes}m${rest}s`
+
+  const hours = Math.floor(minutes / 60)
+  const restMinutes = minutes % 60
+  return restMinutes === 0 ? `${hours}h` : `${hours}h${restMinutes}m`
+}
+
+/** One category of run time, with the matching open intervals only. */
+export function trackOf(run: RunInfo, kind: "model" | "tool"): RunTrack {
+  if (kind === "model") {
+    return {
+      spans: run.modelSpans,
+      totalMs: run.modelMs,
+      open: run.open.filter((span) => !span.tool),
+    }
+  }
+
+  return {
+    spans: run.toolSpans,
+    totalMs: run.toolMs,
+    open: run.open.filter((span) => span.tool),
+  }
 }
 
 /**
@@ -164,23 +207,52 @@ export function insertSpan(spans: Span[], start: number, end: number): number {
 }
 
 /**
- * The session run time with the open intervals included. Open intervals start
- * after the closed ones in practice; any overlap with the last closed span is
- * ignored so a step that is currently being observed is not counted twice.
+ * Run time with the open intervals included. Closed spans and open intervals
+ * are merged together, so a step that is already partly covered, or parallel
+ * tools with a gap between them, cannot be counted twice.
  */
-export function runtimeWithOpen(run: RunInfo, now: number): number {
+export function runtimeWithOpen(run: RunTrack, now: number): number {
   if (run.open.length === 0) return run.totalMs
 
-  let from = Number.POSITIVE_INFINITY
-  let to = 0
+  const open: Span[] = []
   for (const span of run.open) {
-    if (span.start < from) from = span.start
     const end = span.tool ? Math.min(now, span.start + TOOL_RUN_CAP_MS) : now
-    if (end > to) to = end
+    if (end > span.start) open.push({ start: span.start, end })
+  }
+  if (open.length === 0) return run.totalMs
+
+  open.sort((left, right) => left.start - right.start)
+
+  // Merge the open intervals first so two parallel tools cannot double count
+  // their shared part.
+  const merged: Span[] = []
+  for (const span of open) {
+    const last = merged[merged.length - 1]
+    if (last && span.start <= last.end) {
+      if (span.end > last.end) last.end = span.end
+    } else {
+      merged.push({ start: span.start, end: span.end })
+    }
   }
 
-  const last = run.spans.length > 0 ? run.spans[run.spans.length - 1]!.end : 0
-  return run.totalMs + Math.max(0, to - Math.max(from, last))
+  let added = 0
+  let index = 0
+  for (const span of merged) {
+    while (index < run.spans.length && run.spans[index]!.end <= span.start) index += 1
+
+    let cursor = span.start
+    let probe = index
+    while (probe < run.spans.length && run.spans[probe]!.start < span.end) {
+      const closed = run.spans[probe]!
+      if (closed.start > cursor) added += closed.start - cursor
+      if (closed.end > cursor) cursor = closed.end
+      if (cursor >= span.end) break
+      probe += 1
+    }
+    if (cursor < span.end) added += span.end - cursor
+  }
+
+  return run.totalMs + added
 }
 
 export function rateOf(tokens: number, ms: number): number {

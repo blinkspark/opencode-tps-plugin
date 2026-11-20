@@ -4,6 +4,7 @@ import * as tracker from "./tracker"
 import {
   TICK_MS,
   clamp,
+  formatCompactDuration,
   formatDuration,
   formatPercent,
   formatRate,
@@ -14,6 +15,7 @@ import {
   rateOf,
   runtimeWithOpen,
   totalsOf,
+  trackOf,
 } from "./metrics"
 
 export interface TpsBadgeProps {
@@ -51,29 +53,31 @@ export function TpsBadge(props: TpsBadgeProps) {
       if (message.type !== "assistant") continue
 
       // Run time counts failed and interrupted work too: the time was spent.
-      // Only completed messages are seeded, so the active step stays live.
-      const completed = message.time.completed
-      if (completed) {
+      // The stream end is the model window; `completed` can include tool time.
+      const modelEnd = message.time.streamed ?? message.time.completed
+      if (modelEnd) {
         tracker.seedRun(
           serverID,
           sessionID,
-          `step:${message.id}:${completed}`,
+          `step:${message.id}:${modelEnd}`,
           message.time.created,
-          completed,
+          modelEnd,
           false,
         )
+      }
 
-        for (const part of message.content) {
-          if (part.type !== "tool" || !part.time.ran || !part.time.completed) continue
-          tracker.seedRun(
-            serverID,
-            sessionID,
-            `tool:${message.id}:${part.id}:${part.time.completed}`,
-            part.time.ran,
-            part.time.completed,
-            true,
-          )
-        }
+      // Tool execution is a separate interval. `ran` is set after any
+      // permission prompt, so seeding it keeps permission waits out.
+      for (const part of message.content) {
+        if (part.type !== "tool" || !part.time.ran || !part.time.completed) continue
+        tracker.seedRun(
+          serverID,
+          sessionID,
+          `tool:${message.id}:${part.id}:${part.time.completed}`,
+          part.time.ran,
+          part.time.completed,
+          true,
+        )
       }
 
       // Failed/aborted attempts never count toward the session average, so a
@@ -170,19 +174,11 @@ export function TpsBadge(props: TpsBadgeProps) {
     const suffix = totals.approxMs > totals.ms / 2 ? "~" : ""
     const tps = rateOf(totals.tokens, totals.ms)
     const more = props.session.server.data.session.message.more(props.session.id)
-    const runtime = runtimeWithOpen(state.run, Date.now())
 
     const lines = [
       `本会话平均：${suffix}${formatRate(tps)} tok/s`,
       `已统计 ${formatTokens(totals.tokens)} tok / ${formatDuration(totals.ms)} · ${totals.steps} 步`,
     ]
-    if (runtime > 0) {
-      // Only the loaded transcript is seeded; older turns are missing.
-      lines.push(`本会话运行：${more ? "≥" : ""}${formatDuration(runtime)}（不含空闲与权限等待）`)
-      if (state.run.capped > 0) {
-        lines.push(`${state.run.capped} 次超长工具按 30 分钟计`)
-      }
-    }
     if (totals.longWaitSteps > 0) {
       lines.push(`${totals.longWaitSteps} 步含长等待（等待 ${formatDuration(totals.waitMs)} 未计入）`)
     }
@@ -192,7 +188,46 @@ export function TpsBadge(props: TpsBadgeProps) {
     }
 
     return {
-      label: `${suffix}${formatRate(tps)}${props.compact ? "" : " sess"}`,
+      label: `${suffix}${formatRate(tps)}`,
+      title: lines.join("\n"),
+    }
+  }
+
+  const runView = (): Metric | undefined => {
+    tracker.version()
+    tick()
+
+    const state = tracker.snapshot(props.session.server.id, props.session.id)
+    const now = Date.now()
+    const total = runtimeWithOpen(state.run, now)
+    if (total <= 0) return undefined
+
+    const model = runtimeWithOpen(trackOf(state.run, "model"), now)
+    const tool = runtimeWithOpen(trackOf(state.run, "tool"), now)
+    const more = props.session.server.data.session.message.more(props.session.id)
+    const bound = more ? "≥" : ""
+
+    const lines = [
+      `本会话运行：${bound}${formatDuration(total)}（不含空闲与权限等待）`,
+      `模型调用：${bound}${formatDuration(model)}`,
+      `工具调用：${bound}${formatDuration(tool)}`,
+    ]
+
+    // Model and tool windows normally only touch; a longer overlap means they
+    // ran at the same time, so the rows can add up to more than the union.
+    const overlap = model + tool - total
+    if (overlap >= 1_000) {
+      lines.push(`模型与工具重叠 ${formatDuration(overlap)}，合计按并集计`)
+    }
+    if (state.run.capped > 0) {
+      lines.push(`${state.run.capped} 次超长工具按 30 分钟计`)
+    }
+    if (more) {
+      lines.push("仅基于已加载的消息，更早的历史未计入")
+    }
+
+    return {
+      label: formatCompactDuration(total),
       title: lines.join("\n"),
     }
   }
@@ -267,16 +302,18 @@ export function TpsBadge(props: TpsBadgeProps) {
     const rate = clamp(read / total, 0, 1)
     const percent = formatPercent(rate)
     return {
-      label: props.compact ? percent : `cache ${percent}`,
+      label: percent,
       title: `会话缓存：${formatTokens(read)} read · ${formatTokens(write)} write · ${formatTokens(input)} new`,
     }
   }
 
   const mergeMetric = createMemo(mergeView)
   const sessionMetric = createMemo(sessionView)
+  const runMetric = createMemo(runView)
   const ttftMetric = createMemo(ttftView)
   const cacheMetric = createMemo(cacheView)
-  const hasAny = () => Boolean(mergeMetric() || sessionMetric() || ttftMetric() || cacheMetric())
+  const hasAny = () =>
+    Boolean(mergeMetric() || sessionMetric() || runMetric() || ttftMetric() || cacheMetric())
 
   return (
     <Show when={hasAny()}>
@@ -294,6 +331,13 @@ export function TpsBadge(props: TpsBadgeProps) {
           )}
         </Show>
         <Show when={sessionMetric()}>
+          {(metric) => (
+            <span class="opencode-tps-item" title={metric().title}>
+              {metric().label}
+            </span>
+          )}
+        </Show>
+        <Show when={runMetric()}>
           {(metric) => (
             <span class="opencode-tps-item" title={metric().title}>
               {metric().label}
