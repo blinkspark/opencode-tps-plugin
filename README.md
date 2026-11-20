@@ -129,7 +129,7 @@ TTFT 主显示**上一轮**（最近一个**成功完成**且产出 text / reaso
 
 会话平均（`sess`）同样只统计成功完成的 step：失败 attempt 的部分 token 不计入，重试成功后按成功那次的 token / 耗时计一次。
 
-**运行时间**（`sess` 悬停）统计模型 step 与工具执行区间的并集：step 从 `step.started` 到 `step.ended` / `step.failed`（含首 token 等待），工具从 `tool.called` 到 `tool.success` / `tool.failed`。权限确认发生在 `tool.called` 之前，重试退避发生在两次 `step.started` 之间，因此都不计入；后台 shell 与 compaction 也不计入。单个工具超过 30 分钟按 30 分钟封顶，悬停里会注明封顶次数。失败 / 中断轮次中实际已经跑过的时间会保留——运行时间描述的是忙碌时长，不做质量过滤。事件流断开或切换到别的会话后，重新打开时会用已加载消息回填。
+**运行时间**（`sess` 悬停）统计模型 step 与工具执行区间的并集：step 从 `step.started` 到 `step.ended` / `step.failed`（含首 token 等待），工具从 `tool.called` 到 `tool.success` / `tool.failed`。权限确认发生在 `tool.called` 之前，重试退避发生在两次 `step.started` 之间，因此都不计入；后台 shell 与 compaction 也不计入。单个工具超过 30 分钟按 30 分钟封顶，悬停里会注明封顶次数。失败 / 中断轮次中实际已经跑过的时间会保留——运行时间描述的是忙碌时长，不做质量过滤。窗口重载或事件流断开后，会用已加载消息回填。
 
 `session.retry.scheduled` 不参与计时：它的 `at` 是未来的 `nextRetryAt`，每次重试都会紧随一个新的 `session.step.started`。
 
