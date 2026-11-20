@@ -5,10 +5,15 @@ import {
   LONG_WAIT_MS,
   RATIO_MAX,
   RATIO_MIN,
+  TOOL_RUN_CAP_MS,
   WINDOW_MS,
   clamp,
+  insertSpan,
   measureStep,
+  type OpenSpan,
+  type RunInfo,
   type Sample,
+  type Span,
   type StepEntry,
 } from "./metrics"
 
@@ -53,10 +58,27 @@ export interface Snapshot {
   ttft: TtftInfo | undefined
   /** Only steps observed live: the transcript has no first-token timestamp. */
   ttftAverage: TtftAverage
+  /** Wall-clock time the session spent generating or running tools. */
+  run: RunInfo
 }
 
-interface SessionState extends Snapshot {
+interface RuntimeState {
+  spans: Span[]
+  totalMs: number
+  open: Map<string, OpenSpan>
+  capped: number
+  /** Keys of transcript intervals already merged, so re-reads stay cheap. */
+  seeded: Set<string>
+}
+
+interface SessionState {
+  running: boolean
+  live: LiveState
+  entries: Map<string, StepEntry>
+  ttft: TtftInfo | undefined
+  ttftAverage: TtftAverage
   touched: number
+  runtime: RuntimeState
 }
 
 type DeltaKind = "text" | "reasoning"
@@ -117,12 +139,14 @@ function freshLive(ratio = DEFAULT_CHARS_PER_TOKEN): LiveState {
 }
 
 const emptyEntries = new Map<string, StepEntry>()
+const EMPTY_RUN: RunInfo = { spans: [], totalMs: 0, open: [], capped: 0 }
 const EMPTY: Snapshot = {
   running: false,
   live: freshLive(),
   entries: emptyEntries,
   ttft: undefined,
   ttftAverage: { totalMs: 0, steps: 0, longWaitSteps: 0 },
+  run: EMPTY_RUN,
 }
 
 function ensure(id: string): SessionState {
@@ -136,6 +160,13 @@ function ensure(id: string): SessionState {
       live: freshLive(),
       running: false,
       touched: Date.now(),
+      runtime: {
+        spans: [],
+        totalMs: 0,
+        open: new Map(),
+        capped: 0,
+        seeded: new Set(),
+      },
     }
     sessions.set(id, state)
 
@@ -197,6 +228,12 @@ export function snapshot(serverID: string, sessionID: string): Snapshot {
     entries: state.entries,
     ttft: state.ttft,
     ttftAverage: state.ttftAverage,
+    run: {
+      spans: state.runtime.spans,
+      totalMs: state.runtime.totalMs,
+      open: Array.from(state.runtime.open.values()),
+      capped: state.runtime.capped,
+    },
   }
 }
 
@@ -237,11 +274,89 @@ function markFirstText(live: LiveState, time: number) {
   live.firstTextAt = time
 }
 
+function openRun(state: SessionState, key: string, start: number, tool: boolean) {
+  if (!(start > 0)) return
+
+  const existing = state.runtime.open.get(key)
+  if (existing) {
+    if (start < existing.start) existing.start = start
+    return
+  }
+
+  state.runtime.open.set(key, { start, tool })
+}
+
+function closeRunSpan(state: SessionState, span: OpenSpan, end: number) {
+  if (!(end > span.start)) return
+
+  let finish = end
+  const capped = span.tool && finish - span.start > TOOL_RUN_CAP_MS
+  if (capped) finish = span.start + TOOL_RUN_CAP_MS
+
+  const added = insertSpan(state.runtime.spans, span.start, finish)
+  if (added <= 0) return
+
+  state.runtime.totalMs += added
+  if (capped) state.runtime.capped += 1
+}
+
+function closeRun(state: SessionState, key: string, end: number) {
+  const span = state.runtime.open.get(key)
+  if (!span) return
+
+  state.runtime.open.delete(key)
+  closeRunSpan(state, span, end)
+}
+
+function closeAllRuns(state: SessionState, end: number) {
+  for (const [key, span] of Array.from(state.runtime.open)) {
+    state.runtime.open.delete(key)
+    closeRunSpan(state, span, end)
+  }
+}
+
+/**
+ * Merge a step or tool interval from the loaded transcript. Keys include the
+ * completion timestamp, and `insertSpan` is idempotent, so re-reading the
+ * same message cannot double count.
+ */
+export function seedRun(
+  serverID: string,
+  sessionID: string,
+  seedKey: string,
+  start: number,
+  end: number,
+  tool: boolean,
+) {
+  if (!(start > 0) || !(end > start)) return
+
+  const state = ensure(key(serverID, sessionID))
+  if (state.runtime.seeded.has(seedKey)) return
+  state.runtime.seeded.add(seedKey)
+
+  let finish = end
+  const capped = tool && finish - start > TOOL_RUN_CAP_MS
+  if (capped) finish = start + TOOL_RUN_CAP_MS
+
+  const added = insertSpan(state.runtime.spans, start, finish)
+  if (added <= 0) return
+
+  state.runtime.totalMs += added
+  if (capped) state.runtime.capped += 1
+  notify(state)
+}
+
 function begin(serverID: string, sessionID: string, started: number) {
   const state = ensure(key(serverID, sessionID))
+  const start = started > 0 ? started : Date.now()
+
+  // A retry reuses the step slot; close a step that never reported an end
+  // before starting the new attempt.
+  closeRun(state, "step", start)
   state.live = freshLive(state.live.ratio)
-  state.live.startedAt = started > 0 ? started : Date.now()
+  state.live.startedAt = start
   state.running = true
+  openRun(state, "step", start, false)
   notify(state)
 }
 
@@ -286,20 +401,37 @@ function push(
   notify(state)
 }
 
-function toolStart(serverID: string, sessionID: string, at: number) {
+/** Tool-call arguments are model output, so they belong to the step window. */
+function toolInputStart(serverID: string, sessionID: string, at: number) {
   const state = ensure(key(serverID, sessionID))
-  // Tool-call arguments count as output tokens for the generation window, but
-  // they are not text/reasoning, so they never set TTFT.
   markFirstOutput(state.live, at > 0 ? at : Date.now())
   notify(state)
 }
 
-function toolEnd(serverID: string, sessionID: string, text: string, at: number) {
+function toolInputEnd(serverID: string, sessionID: string, text: string, at: number) {
   const state = ensure(key(serverID, sessionID))
   const time = at > 0 ? at : Date.now()
   markFirstOutput(state.live, time)
   state.live.lastActivityAt = Math.max(state.live.lastActivityAt, time)
   state.live.toolChars += text.length
+  notify(state)
+}
+
+function toolStart(serverID: string, sessionID: string, id: string, at: number) {
+  const state = ensure(key(serverID, sessionID))
+  const time = at > 0 ? at : Date.now()
+  markFirstOutput(state.live, time)
+  // Tool execution is part of the session's run time. `session.tool.called`
+  // fires after any permission prompt, so waiting for the user is excluded.
+  openRun(state, `tool:${id}`, time, true)
+  notify(state)
+}
+
+function toolEnd(serverID: string, sessionID: string, id: string, at: number) {
+  const state = ensure(key(serverID, sessionID))
+  const time = at > 0 ? at : Date.now()
+  state.live.lastActivityAt = Math.max(state.live.lastActivityAt, time)
+  closeRun(state, `tool:${id}`, time)
   notify(state)
 }
 
@@ -323,6 +455,8 @@ function finish(
   const live = state.live
   const produced = Math.max(0, tokens.output + (configured ? tokens.reasoning : 0))
   const end = at > 0 ? at : Date.now()
+  // The request window ends with the step, whether it succeeded or failed.
+  closeRun(state, "step", end)
   // A step whose `step.started` was missed has no usable baseline. Leave it to
   // the transcript seed instead of dividing by epoch-sized nonsense.
   const valid = live.startedAt > 0 && live.startedAt <= end
@@ -407,10 +541,13 @@ function finish(
   notify(state)
 }
 
-function stop(serverID: string, sessionID: string) {
+function stop(serverID: string, sessionID: string, at?: number) {
   const state = sessions.get(key(serverID, sessionID))
   if (!state) return
 
+  // Execution-level stops close anything that is still open: a step that
+  // never reported an end, or a tool whose completion was lost.
+  closeAllRuns(state, at && at > 0 ? at : Date.now())
   state.live = freshLive(state.live.ratio)
   state.running = false
   // Keep `ttft`: it describes the last completed step, and it must survive
@@ -453,10 +590,19 @@ export function attach(data: Data, serverID: string) {
       push(serverID, event.data.sessionID, event.data.delta, event.created, "reasoning")
     })
     data.on("session.tool.input.started", (event) => {
-      toolStart(serverID, event.data.sessionID, event.created)
+      toolInputStart(serverID, event.data.sessionID, event.created)
     })
     data.on("session.tool.input.ended", (event) => {
-      toolEnd(serverID, event.data.sessionID, event.data.text, event.created)
+      toolInputEnd(serverID, event.data.sessionID, event.data.text, event.created)
+    })
+    data.on("session.tool.called", (event) => {
+      toolStart(serverID, event.data.sessionID, event.data.id, event.created)
+    })
+    data.on("session.tool.success", (event) => {
+      toolEnd(serverID, event.data.sessionID, event.data.id, event.created)
+    })
+    data.on("session.tool.failed", (event) => {
+      toolEnd(serverID, event.data.sessionID, event.data.id, event.created)
     })
     data.on("session.step.streamed", (event) => {
       streamed(serverID, event.data.sessionID, event.created)
@@ -471,17 +617,20 @@ export function attach(data: Data, serverID: string) {
       if (event.data.tokens) {
         finish(serverID, event.data.sessionID, event.data.assistantMessageID, event.data.tokens, event.created, true)
       } else {
-        stop(serverID, event.data.sessionID)
+        stop(serverID, event.data.sessionID, event.created)
       }
     })
     data.on("session.idle", (event) => {
-      stop(serverID, event.data.sessionID)
+      stop(serverID, event.data.sessionID, event.created)
+    })
+    data.on("session.execution.succeeded", (event) => {
+      stop(serverID, event.data.sessionID, event.created)
     })
     data.on("session.execution.failed", (event) => {
-      stop(serverID, event.data.sessionID)
+      stop(serverID, event.data.sessionID, event.created)
     })
     data.on("session.execution.interrupted", (event) => {
-      stop(serverID, event.data.sessionID)
+      stop(serverID, event.data.sessionID, event.created)
     })
   }
 

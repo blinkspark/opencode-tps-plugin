@@ -12,6 +12,7 @@ import {
   latestStep,
   liveRate,
   rateOf,
+  runtimeWithOpen,
   totalsOf,
 } from "./metrics"
 
@@ -47,9 +48,37 @@ export function TpsBadge(props: TpsBadgeProps) {
     const messages = data.session.message.list(sessionID)
 
     for (const message of messages) {
+      if (message.type !== "assistant") continue
+
+      // Run time counts failed and interrupted work too: the time was spent.
+      // Only completed messages are seeded, so the active step stays live.
+      const completed = message.time.completed
+      if (completed) {
+        tracker.seedRun(
+          serverID,
+          sessionID,
+          `step:${message.id}:${completed}`,
+          message.time.created,
+          completed,
+          false,
+        )
+
+        for (const part of message.content) {
+          if (part.type !== "tool" || !part.time.ran || !part.time.completed) continue
+          tracker.seedRun(
+            serverID,
+            sessionID,
+            `tool:${message.id}:${part.id}:${part.time.completed}`,
+            part.time.ran,
+            part.time.completed,
+            true,
+          )
+        }
+      }
+
       // Failed/aborted attempts never count toward the session average, so a
       // reloaded transcript must not seed them either.
-      if (message.type !== "assistant" || !message.tokens || message.error) continue
+      if (!message.tokens || message.error) continue
 
       const end = message.time.streamed ?? message.time.completed
       if (!end) continue
@@ -67,8 +96,15 @@ export function TpsBadge(props: TpsBadgeProps) {
     return tracker.snapshot(props.session.server.id, props.session.id).running
   })
 
+  // Tool execution (and a long first-token wait) is run time even though no
+  // step is streaming, so the title has to keep ticking then as well.
+  const runActive = createMemo(() => {
+    tracker.version()
+    return tracker.snapshot(props.session.server.id, props.session.id).run.open.length > 0
+  })
+
   createEffect(() => {
-    if (!props.active || !running()) return
+    if (!props.active || (!running() && !runActive())) return
 
     const timer = setInterval(() => setTick((value) => value + 1), TICK_MS)
     onCleanup(() => clearInterval(timer))
@@ -125,6 +161,7 @@ export function TpsBadge(props: TpsBadgeProps) {
 
   const sessionView = (): Metric | undefined => {
     tracker.version()
+    tick()
 
     const state = tracker.snapshot(props.session.server.id, props.session.id)
     const totals = totalsOf(state.entries.values())
@@ -132,16 +169,25 @@ export function TpsBadge(props: TpsBadgeProps) {
 
     const suffix = totals.approxMs > totals.ms / 2 ? "~" : ""
     const tps = rateOf(totals.tokens, totals.ms)
+    const more = props.session.server.data.session.message.more(props.session.id)
+    const runtime = runtimeWithOpen(state.run, Date.now())
 
     const lines = [
       `本会话平均：${suffix}${formatRate(tps)} tok/s`,
       `已统计 ${formatTokens(totals.tokens)} tok / ${formatDuration(totals.ms)} · ${totals.steps} 步`,
     ]
+    if (runtime > 0) {
+      // Only the loaded transcript is seeded; older turns are missing.
+      lines.push(`本会话运行：${more ? "≥" : ""}${formatDuration(runtime)}（不含空闲与权限等待）`)
+      if (state.run.capped > 0) {
+        lines.push(`${state.run.capped} 次超长工具按 30 分钟计`)
+      }
+    }
     if (totals.longWaitSteps > 0) {
       lines.push(`${totals.longWaitSteps} 步含长等待（等待 ${formatDuration(totals.waitMs)} 未计入）`)
     }
     if (totals.approxMs > 0) lines.push("部分 step 按整步耗时估算")
-    if (props.session.server.data.session.message.more(props.session.id)) {
+    if (more) {
       lines.push("仅统计已加载的消息，更早的历史未计入")
     }
 
